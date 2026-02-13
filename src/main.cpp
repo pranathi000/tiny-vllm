@@ -85,7 +85,8 @@ int readSafetensorsFile()
             offset_end : offset_end
         });
     }
-    // TODO: perhaps hide it with pragma or something like that, it's only for debug
+
+#ifdef DEBUG
     for (auto &tensor : tensors)
     {
         std::cout << tensor.tensor_name << ", dtype: " << tensor.dtype << ", shape: (";
@@ -95,6 +96,8 @@ int readSafetensorsFile()
         }
         std::cout << "), offset: [" << tensor.offset_begin << ", " << tensor.offset_end << "]" << std::endl;
     }
+#endif
+
     void *gpu_tensors;
     cudaMalloc(&gpu_tensors, max_offset);
     std::vector<char> tensors_data;
@@ -103,6 +106,26 @@ int readSafetensorsFile()
     cudaMemcpy(gpu_tensors, tensors_data.data(), max_offset, cudaMemcpyHostToDevice);
     std::cout << "Copied model tensors to GPU correctly!\n";
     file_handle.close();
+
+#ifdef DEBUG
+    int test_size = 20;
+    std::vector<char> test_from_gpu;
+    test_from_gpu.resize(20);
+    cudaMemcpy(test_from_gpu.data(), gpu_tensors, 20, cudaMemcpyDeviceToHost);
+    std::cout << "\nCopied from GPU:\n";
+    std::cout << "\n"
+              << test_from_gpu.data() << "\n";
+    for (auto &i : test_from_gpu)
+    {
+        printf("%02x ", (unsigned char)i);
+    }
+    std::cout << "\nOriginal CPU data:\n";
+    for (int i = 0; i < 20; ++i)
+    {
+        printf("%02x ", (unsigned char)tensors_data[i]);
+    }
+#endif
+
     return 0;
 }
 
