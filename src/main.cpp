@@ -50,17 +50,17 @@ struct TensorMetadata
 
 struct Weights
 {
-    __nv_bfloat16* embed_tokens;
-    __nv_bfloat16* input_layernorms[N_LAYERS];
-    __nv_bfloat16* mlp_down_proj[N_LAYERS];
-    __nv_bfloat16* mlp_gate_proj[N_LAYERS];
-    __nv_bfloat16* mlp_up_proj[N_LAYERS];
-    __nv_bfloat16* post_attn_layernorms[N_LAYERS];
-    __nv_bfloat16* w_k[N_LAYERS];
-    __nv_bfloat16* w_o[N_LAYERS];
-    __nv_bfloat16* w_q[N_LAYERS];
-    __nv_bfloat16* w_v[N_LAYERS];
-    __nv_bfloat16* norm;
+    __nv_bfloat16 *embed_tokens;
+    __nv_bfloat16 *input_layernorm[N_LAYERS];
+    __nv_bfloat16 *mlp_down_proj[N_LAYERS];
+    __nv_bfloat16 *mlp_gate_proj[N_LAYERS];
+    __nv_bfloat16 *mlp_up_proj[N_LAYERS];
+    __nv_bfloat16 *post_attn_layernorms[N_LAYERS];
+    __nv_bfloat16 *w_k[N_LAYERS];
+    __nv_bfloat16 *w_o[N_LAYERS];
+    __nv_bfloat16 *w_q[N_LAYERS];
+    __nv_bfloat16 *w_v[N_LAYERS];
+    __nv_bfloat16 *norm;
 };
 
 int main(int argc, char *argv[])
@@ -78,17 +78,17 @@ int main(int argc, char *argv[])
         return 1;
     }
     uint64_t header_size;
-    // reinterpret_cast<char*> gives me an address of header_size
+    // reinterpret_cast<char*>(&header_size) gives me an address of header_size
     safetensors_file.read(reinterpret_cast<char *>(&header_size), 8);
     std::cout << "Safetensors header size read correctly. Size of header: " << header_size << std::endl;
-    std::string header;
-    header.resize(header_size);
-    safetensors_file.read(header.data(), header_size);
+    std::string header_raw;
+    header_raw.resize(header_size);
+    safetensors_file.read(header_raw.data(), header_size);
     std::cout << "Header read correctly\n";
-    std::vector<TensorMetadata> tensors;
-    json j = json::parse(header);
+    std::unordered_map<std::string, uint64_t> tensor_offsets;
+    json header_json = json::parse(header_raw);
     uint64_t max_offset = 0;
-    for (auto &[key, value] : j.items())
+    for (auto &[key, value] : header_json.items())
     {
         if (key == "__metadata__")
         {
@@ -99,26 +99,8 @@ int main(int argc, char *argv[])
         {
             max_offset = offset_end;
         }
-        tensors.push_back(TensorMetadata{
-            tensor_name : key,
-            dtype : value["dtype"].get<std::string>(),
-            shape : value["shape"].get<std::vector<int>>(),
-            offset_begin : value["data_offsets"].at(0).get<uint64_t>(),
-            offset_end : offset_end
-        });
+        tensor_offsets[key] = value["data_offsets"].at(0).get<uint64_t>();
     }
-
-#ifdef DEBUG
-    for (auto &tensor : tensors)
-    {
-        std::cout << tensor.tensor_name << ", dtype: " << tensor.dtype << ", shape: (";
-        for (auto &shape_item : tensor.shape)
-        {
-            std::cout << shape_item << ", ";
-        }
-        std::cout << "), offset: [" << tensor.offset_begin << ", " << tensor.offset_end << "]" << std::endl;
-    }
-#endif
 
     void *gpu_tensors;
     cudaMalloc(&gpu_tensors, max_offset);
@@ -149,7 +131,21 @@ int main(int argc, char *argv[])
 #endif
 
     Weights weights{};
-    weights.embed_tokens = (__nv_bfloat16*)((char*)gpu_tensors+tensors[0].offset_begin);
+    weights.embed_tokens = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.embed_tokens.weight"));
+    weights.norm = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.norm.weight"));
+    for (int i = 0; i < N_LAYERS; ++i)
+    {
+        weights.input_layernorm[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".input_layernorm.weight"));
+        weights.mlp_down_proj[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".mlp.down_proj.weight"));
+        weights.mlp_gate_proj[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".mlp.gate_proj.weight"));
+        weights.mlp_up_proj[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".mlp.up_proj.weight"));
+        weights.post_attn_layernorms[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".post_attention_layernorm.weight"));
+        weights.w_k[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".self_attn.k_proj.weight"));
+        weights.w_o[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".self_attn.o_proj.weight"));
+        weights.w_q[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".self_attn.q_proj.weight"));
+        weights.w_q[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".self_attn.q_proj.weight"));
+        weights.w_v[i] = (__nv_bfloat16 *)((char *)gpu_tensors + tensor_offsets.at("model.layers." + std::to_string(i) + ".self_attn.v_proj.weight"));
+    }
 
     std::vector<int> input_tokens;
     int token;
@@ -159,11 +155,12 @@ int main(int argc, char *argv[])
     }
 #ifdef DEBUG
     std::cout << "Input tokens:\n";
-    for (auto& token: input_tokens) {
+    for (auto &token : input_tokens)
+    {
         std::cout << token << "\n";
     }
 #endif
-    
+
     std::cout << "\nClosing the program\n";
     return 0;
 }
