@@ -46,8 +46,13 @@ struct TensorMetadata
     uint64_t offset_end;
 };
 
-int readSafetensorsFile()
+int main(int argc, char *argv[])
 {
+    if (checkGPUStatus() != 0)
+    {
+        return 1;
+    }
+
     std::ifstream file_handle("model.safetensors", std::ios_base::binary); // TODO: use args to provide the path or smth
     if (!file_handle.is_open())
     {
@@ -125,22 +130,20 @@ int readSafetensorsFile()
         printf("%02x ", (unsigned char)tensors_data[i]);
     }
 #endif
-
-    return 0;
-}
-
-int main(int argc, char *argv[])
-{
-    if (checkGPUStatus() != 0)
+    std::vector<int> input_tokens;
+    int token;
+    while (std::cin >> token)
     {
-        return 1;
+        input_tokens.push_back(token);
     }
-
-    if (readSafetensorsFile() != 0)
-    {
-        return 1;
+#ifdef DEBUG
+    std::cout << "Input tokens:\n";
+    for (auto& token: input_tokens) {
+        std::cout << token << "\n";
     }
+#endif
+    
 
-    std::cout << "Closing the program\n";
+    std::cout << "\nClosing the program\n";
     return 0;
 }

@@ -21,4 +21,10 @@ Main design choices:
 - Test on Llama 3.2 1B
 - Single GPU (tested on RTX 5090 32GB)
 
+### use
+
+```
+python python/tokenizer.py "The capital of France is" | ./tiny-vllm
+```
+
 Jędrzej Maczan, 2026, Apache License 2.0

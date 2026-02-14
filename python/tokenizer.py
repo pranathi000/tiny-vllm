@@ -38,8 +38,12 @@ def main():
                 json.dump(ids, f)
             print(f"Wrote {len(ids)} tokens to {args.output}")
         else:
-            print(f"Tokens ({len(ids)}): {ids}")
-            print(f"Decoded: {[tokenizer.decode([t]) for t in ids]}")
+            space_delimited_tokens = ""
+            for index, id in enumerate(ids):
+                space_delimited_tokens += f"{id}"
+                if index != len(ids) - 1:
+                    space_delimited_tokens += " "
+            print(space_delimited_tokens)
 
 
 if __name__ == "__main__":
