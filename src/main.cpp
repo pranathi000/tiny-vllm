@@ -5,6 +5,7 @@
 #define JSON_USE_IMPLICIT_CONVERSIONS 0
 #include "json.hpp"
 #include "kernels.cuh"
+#include "main.h"
 
 using json = nlohmann::json;
 
@@ -39,6 +40,75 @@ int checkGPUStatus()
     cublasDestroy(handle);
 
     return 0;
+}
+
+bool verifyModelWeightsCopy(void *model_weights, std::vector<char> &model_weights_cpu)
+{
+    std::vector<char> test_from_gpu;
+    test_from_gpu.resize(20);
+    cudaMemcpy(test_from_gpu.data(), model_weights, 20, cudaMemcpyDeviceToHost);
+    bool is_correct = true;
+    for (int i = 0; i < 20; ++i)
+    {
+        if ((unsigned char)model_weights_cpu[i] == (unsigned char)test_from_gpu[i])
+        {
+            continue;
+        }
+        if (is_correct)
+        {
+            std::cout << "Model weights copied to GPU incorrectly!:\n";
+        }
+        printf("%02x ", (unsigned char)model_weights_cpu[i] == (unsigned char)test_from_gpu[i]);
+        is_correct = false;
+    }
+    return is_correct;
+}
+
+bool verifyInputTokensCopy(std::vector<int> &input_tokens, int *gpu_input_tokens)
+{
+    std::vector<int> test_from_gpu_tokens;
+    test_from_gpu_tokens.resize(input_tokens.size());
+    cudaMemcpy(test_from_gpu_tokens.data(), gpu_input_tokens, input_tokens.size() * sizeof(int), cudaMemcpyDeviceToHost);
+    bool is_correct = true;
+    for (int i = 0; i < input_tokens.size(); ++i)
+    {
+        if (input_tokens[i] == test_from_gpu_tokens[i])
+        {
+            continue;
+        }
+        if (is_correct)
+        {
+            std::cout << "Input tokens copy mismatch!" << std::endl;
+        }
+        std::cout << "CPU: " << input_tokens[i] << " | GPU: " << test_from_gpu_tokens[i] << "\n";
+        is_correct = false;
+    }
+    return is_correct;
+}
+
+bool verifyEmbeddingGather(std::vector<int> &input_tokens, nv_bfloat16 *input_embeddings, std::vector<char> &model_weights_cpu, std::unordered_map<std::string, uint64_t> &offsets)
+{
+    std::vector<__nv_bfloat16> test_gpu_input_embeds;
+    test_gpu_input_embeds.resize(EMBEDDING_LENGTH * input_tokens.size());
+    cudaMemcpy(test_gpu_input_embeds.data(), input_embeddings, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH, cudaMemcpyDeviceToHost);
+    bool is_correct = true;
+    for (int token = 0; token < input_tokens.size(); ++token)
+    {
+        for (int i = 0; i < 2048; ++i)
+        {
+            __nv_bfloat16 *all_embeds_cpu = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.embed_tokens.weight"));
+            if ((float)test_gpu_input_embeds[token * 2048 + i] != (float)all_embeds_cpu[input_tokens[token] * 2048 + i])
+            {
+                if (is_correct)
+                {
+                    std::cout << "Incorrect embeddings were retrieved" << std::endl;
+                }
+                std::cout << "GPU:" << (float)test_gpu_input_embeds[token * 2048 + i] << " | CPU: " << (float)all_embeds_cpu[input_tokens[token] * 2048 + i] << "\n";
+                is_correct = false;
+            }
+        }
+    }
+    return is_correct;
 }
 
 struct Weights
@@ -112,25 +182,10 @@ int main(int argc, char *argv[])
     safetensors_file.read(model_weights_cpu.data(), max_offset);
 
     cudaMemcpy(model_weights, model_weights_cpu.data(), max_offset, cudaMemcpyHostToDevice);
-#ifdef DEBUG
-    std::cout << "Copied model weights from CPU to GPU correctly!\n";
-    std::cout << "Checking if model weights are copied from CPU to GPU correctly:";
-    std::vector<char> test_from_gpu;
-    test_from_gpu.resize(20);
-    cudaMemcpy(test_from_gpu.data(), model_weights, 20, cudaMemcpyDeviceToHost);
-    std::cout << "\nCopied from GPU:\n";
-    std::cout << "\n"
-              << test_from_gpu.data() << "\n";
-    for (auto &i : test_from_gpu)
+    if (!verifyModelWeightsCopy(model_weights, model_weights_cpu))
     {
-        printf("%02x ", (unsigned char)i);
+        return 1;
     }
-    std::cout << "\nOriginal CPU data:\n";
-    for (int i = 0; i < 20; ++i)
-    {
-        printf("%02x ", (unsigned char)model_weights_cpu[i]);
-    }
-#endif
     safetensors_file.close();
 
     // BASICALLY A HELPER STRUCT TO HAVE AN EASY ACCESS TO ANY MODEL WEIGHTS ON GPU
@@ -179,24 +234,12 @@ int main(int argc, char *argv[])
     int *gpu_input_tokens;
     cudaMalloc(&gpu_input_tokens, input_tokens.size() * sizeof(int));
     cudaMemcpy(gpu_input_tokens, input_tokens.data(), input_tokens.size() * sizeof(int), cudaMemcpyHostToDevice);
-
 #ifdef DEBUG
-    std::cout << "\nInput tokens copied to GPU:\n";
-    std::vector<int> test_from_gpu_tokens;
-    test_from_gpu_tokens.resize(input_tokens.size());
-    cudaMemcpy(test_from_gpu_tokens.data(), gpu_input_tokens, input_tokens.size() * sizeof(int), cudaMemcpyDeviceToHost);
-    std::cout << "\nCopied tokens from GPU:\n";
-    for (auto &i : test_from_gpu_tokens)
+    if (!verifyInputTokensCopy(input_tokens, gpu_input_tokens))
     {
-        std::cout << i << "\n";
-    }
-    std::cout << "\nOriginal CPU tokens data:\n";
-    for (int i = 0; i < input_tokens.size(); ++i)
-    {
-        std::cout << input_tokens[i] << "\n";
+        return 1;
     }
 #endif
-
     // INFERENCE STARTS HERE! =]
     // I have the same amount of embeddings as input tokens
     // it's just every embedding is 2048 length bf16 vector
@@ -206,20 +249,9 @@ int main(int argc, char *argv[])
     embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, input_tokens.size());
     cudaDeviceSynchronize();
 #ifdef DEBUG
-    std::cout << "Checking if the correct embedding was copied" << std::endl;
-    std::vector<__nv_bfloat16> test_gpu_input_embeds;
-    test_gpu_input_embeds.resize(EMBEDDING_LENGTH * input_tokens.size());
-    cudaMemcpy(test_gpu_input_embeds.data(), input_embeddings, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH, cudaMemcpyDeviceToHost);
-    std::cout << "\nCopied embeds from GPU:\n";
-    std::cout << "\nOriginal CPU embeds data:\n";
-    std::cout << "model_weights_cpu.size():" << model_weights_cpu.size() << std::endl;
-    for (int token = 0; token < input_tokens.size(); ++token)
+    if (!verifyEmbeddingGather(input_tokens, input_embeddings, model_weights_cpu, offsets))
     {
-        for (int i = 0; i < 2048; ++i)
-        {
-            __nv_bfloat16 *all_embeds_cpu = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.embed_tokens.weight"));
-            // std::cout << "From gpu:" << (float)test_gpu_input_embeds[token * 2048 + i] << "- from cpu: " << (float)all_embeds_cpu[input_tokens[token] * 2048 + i] << "\n";
-        }
+        return 1;
     }
 #endif
     std::cout << "\nOk bye!\n";
