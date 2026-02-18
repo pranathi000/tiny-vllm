@@ -34,7 +34,7 @@ __global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_
     int workIndex = threadIdx.x + blockIdx.x * 2048;
     if (workIndex < num_tokens * 2048)
     {
-        rms_vector[threadIdx.x] = input[workIndex] * input[workIndex] + input[workIndex + 1024] * input[workIndex + 1024];
+        rms_vector[threadIdx.x] = (float)input[workIndex] * (float)input[workIndex] + (float)input[workIndex + 1024] * (float)input[workIndex + 1024];
         __syncthreads();
         // tree reduction
         if (threadIdx.x % 2 == 0) {
@@ -79,12 +79,12 @@ __global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_
 	}
 	__syncthreads();
 	if (threadIdx.x == 0) {
-	    rms_vector[0] = sqrt(rms_vector[0] / 2048 + 1.0e-5);
+	    rms_vector[0] = sqrt(rms_vector[0] / 2048.0 + 1.0e-5);
 	}
 	__syncthreads();
         // <(^-^)>
-        output[workIndex] = (__nv_bfloat16)((input[workIndex] / rms_vector[0]) * norm_weights[threadIdx.x]);
-        output[workIndex + 1024] = (__nv_bfloat16)((input[workIndex + 1024] / rms_vector[0]) * norm_weights[threadIdx.x]);
+        output[workIndex] = (__nv_bfloat16)(((float)input[workIndex] / rms_vector[0]) * (float)norm_weights[threadIdx.x]);
+        output[workIndex + 1024] = (__nv_bfloat16)(((float)input[workIndex + 1024] / rms_vector[0]) * (float)norm_weights[threadIdx.x + 1024]);
     }
 }
 
