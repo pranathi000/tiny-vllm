@@ -43,3 +43,5 @@ build/
 node_modules/
 .venv/
 model.safetensors
+*.nsys-rep
+*.sqlite

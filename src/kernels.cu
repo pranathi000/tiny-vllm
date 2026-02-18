@@ -1,7 +1,6 @@
 #include "kernels.cuh"
 #include <iostream>
 
-
 // gpu_input_tokens - N tokens
 // gpu_input_embeds - N * sizeof(__nv_bfloat16) * 2048
 // embed_tokens - (100000+smth, 2048)
@@ -11,12 +10,10 @@ __global__ void embeddingGatherKernel(int *gpu_input_tokens, __nv_bfloat16 *gpu_
     int workIndex = threadIdx.x + blockIdx.x * blockDim.x;
     if (workIndex < num_input_tokens)
     {
-        // __nv_bfloat16 embed[2048];
         for (int i = 0; i < 2048; ++i)
         {
-            gpu_input_embeds[workIndex*2048 + i] = embed_tokens[gpu_input_tokens[workIndex]* 2048 + i];
+            gpu_input_embeds[workIndex * 2048 + i] = embed_tokens[gpu_input_tokens[workIndex] * 2048 + i];
         }
-        // gpu_input_embeds[workIndex*2048] = *embed;
     }
 }
 
