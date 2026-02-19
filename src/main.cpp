@@ -112,6 +112,56 @@ bool verifyEmbeddingGather(std::vector<int> &input_tokens, nv_bfloat16 *input_em
     return is_correct;
 }
 
+bool floats_close_enough(float a, float b)
+{
+    return fabs(a - b) / fmax(fabs(a), fabs(b)) < 1e-3;
+}
+
+bool verifyRMSNormWeights(std::vector<char> &model_weights_cpu, std::unordered_map<std::string, uint64_t> &offsets)
+{
+    __nv_bfloat16 *layernorm_weights = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.layers.0.input_layernorm.weight"));
+    std::vector<float> rms_norm_debug_values = {0.154297, 0.182617, 0.255859, -0.0116577, 0.140625, 0.19043, -0.139648, -0.160156, 0.139648, -0.170898};
+    bool is_correct_rms_weight = true;
+    for (int i = 0; i < 10; ++i)
+    {
+        if (!floats_close_enough((float)layernorm_weights[i], rms_norm_debug_values[i]))
+        {
+            if (is_correct_rms_weight)
+            {
+                std::cout << "RMS norm weights check failed" << std::endl;
+            }
+            std::cout << "Expected RMS norm weight: " << rms_norm_debug_values[i] << ", received: " << (float)layernorm_weights[i] << std::endl;
+            is_correct_rms_weight = false;
+        }
+    }
+    return is_correct_rms_weight;
+}
+
+bool verifyRMSNorm(std::vector<int> &input_tokens, nv_bfloat16 *input_embeddings, std::vector<char> &model_weights_cpu, std::unordered_map<std::string, uint64_t> &offsets)
+{
+    std::vector<__nv_bfloat16> test_gpu_input_embeds;
+    test_gpu_input_embeds.resize(EMBEDDING_LENGTH * input_tokens.size());
+    cudaMemcpy(test_gpu_input_embeds.data(), input_embeddings, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH, cudaMemcpyDeviceToHost);
+    bool is_correct = true;
+    for (int token = 0; token < input_tokens.size(); ++token)
+    {
+        for (int i = 0; i < 2048; ++i)
+        {
+            __nv_bfloat16 *all_embeds_cpu = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.embed_tokens.weight"));
+            if ((float)test_gpu_input_embeds[token * 2048 + i] != (float)all_embeds_cpu[input_tokens[token] * 2048 + i])
+            {
+                if (is_correct)
+                {
+                    std::cout << "Incorrect embeddings were retrieved" << std::endl;
+                }
+                std::cout << "GPU:" << (float)test_gpu_input_embeds[token * 2048 + i] << " | CPU: " << (float)all_embeds_cpu[input_tokens[token] * 2048 + i] << "\n";
+                is_correct = false;
+            }
+        }
+    }
+    return is_correct;
+}
+
 struct Weights
 {
     __nv_bfloat16 *embed_tokens;
@@ -259,6 +309,10 @@ int main(int argc, char *argv[])
     cudaMalloc(&rms_norms, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     rmsNorm(input_embeddings, rms_norms, weights.input_layernorm[0], input_tokens.size());
     cudaDeviceSynchronize();
+#ifdef DEBUG
+    verifyRMSNormWeights(model_weights_cpu, offsets);
+    verifyRMSNorm(rms_norms);
+#endif
 
     std::cout << "\nOk bye!\n";
     return 0;
