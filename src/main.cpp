@@ -131,14 +131,13 @@ bool verifyRmsNorm(__nv_bfloat16 *gpu_input, __nv_bfloat16 *gpu_output,
                    std::unordered_map<std::string, uint64_t> &offsets,
                    int num_tokens, int layer)
 {
-    constexpr int DIM = 2048;
     constexpr float EPSILON = 1e-5f;
     constexpr float TOLERANCE = 1e-2f;
 
-    std::vector<__nv_bfloat16> cpu_input(num_tokens * DIM);
-    std::vector<__nv_bfloat16> cpu_output(num_tokens * DIM);
-    cudaMemcpy(cpu_input.data(), gpu_input, num_tokens * DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-    cudaMemcpy(cpu_output.data(), gpu_output, num_tokens * DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    std::vector<__nv_bfloat16> cpu_input(num_tokens * EMBEDDING_LENGTH);
+    std::vector<__nv_bfloat16> cpu_output(num_tokens * EMBEDDING_LENGTH);
+    cudaMemcpy(cpu_input.data(), gpu_input, num_tokens * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    cudaMemcpy(cpu_output.data(), gpu_output, num_tokens * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
 
     std::string weight_key = "model.layers." + std::to_string(layer) + ".input_layernorm.weight";
     __nv_bfloat16 *norm_weights = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at(weight_key));
@@ -147,19 +146,19 @@ bool verifyRmsNorm(__nv_bfloat16 *gpu_input, __nv_bfloat16 *gpu_output,
     for (int t = 0; t < num_tokens; ++t)
     {
         float sum_sq = 0.0f;
-        for (int i = 0; i < DIM; ++i)
+        for (int i = 0; i < EMBEDDING_LENGTH; ++i)
         {
-            float val = (float)cpu_input[t * DIM + i];
+            float val = (float)cpu_input[t * EMBEDDING_LENGTH + i];
             sum_sq += val * val;
         }
-        float rms = sqrtf(sum_sq / DIM + EPSILON);
+        float rms = sqrtf(sum_sq / EMBEDDING_LENGTH + EPSILON);
 
-        for (int i = 0; i < DIM; ++i)
+        for (int i = 0; i < EMBEDDING_LENGTH; ++i)
         {
-            float input_val = (float)cpu_input[t * DIM + i];
+            float input_val = (float)cpu_input[t * EMBEDDING_LENGTH + i];
             float weight_val = (float)norm_weights[i];
             float expected = (input_val / rms) * weight_val;
-            float actual = (float)cpu_output[t * DIM + i];
+            float actual = (float)cpu_output[t * EMBEDDING_LENGTH + i];
 
             float rel_err = (expected == 0.0f) ? fabs(actual) : fabs(actual - expected) / fabs(expected);
             if (rel_err > TOLERANCE || isnanf(actual) || isnanf(expected))
@@ -176,6 +175,50 @@ bool verifyRmsNorm(__nv_bfloat16 *gpu_input, __nv_bfloat16 *gpu_output,
     }
 
     return mismatches == 0;
+}
+
+bool verifyQProjection(cublasStatus_t gemm_status, std::vector<int> &input_tokens, nv_bfloat16 *q, std::vector<char> &model_weights_cpu, std::unordered_map<std::string, uint64_t> &offsets, nv_bfloat16 *rms_norms)
+{
+    std::cout << "Cublas first gemm status: " << gemm_status << std::endl;
+    std::vector<__nv_bfloat16> q_cpu(input_tokens.size() * EMBEDDING_LENGTH);
+    cudaMemcpy(q_cpu.data(), q, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    std::vector<float> q_cpu_crosscheck(input_tokens.size() * EMBEDDING_LENGTH);
+    __nv_bfloat16 *q_cpu_weights = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.layers.0.self_attn.q_proj.weight"));
+    std::vector<__nv_bfloat16> rms_norms_cpu(input_tokens.size() * EMBEDDING_LENGTH);
+    cudaMemcpy(rms_norms_cpu.data(), rms_norms, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    // input_tokens * w_q^T (N, 2048) x (2048, 2048) -> (N, 2048)
+    bool is_correct = true;
+    for (int token_idx = 0; token_idx < input_tokens.size(); ++token_idx)
+    {
+        for (int j = 0; j < EMBEDDING_LENGTH; ++j)
+        {
+            float sum = 0.0f;
+            for (int k = 0; k < EMBEDDING_LENGTH; ++k)
+            {
+                float input_value = (float)rms_norms_cpu[token_idx * EMBEDDING_LENGTH + k];
+                float weight_value = (float)q_cpu_weights[j * EMBEDDING_LENGTH + k];
+                sum += input_value * weight_value;
+            }
+            float actual = (float)q_cpu[token_idx * EMBEDDING_LENGTH + j];
+            float rel_err = (sum == 0.0f) ? fabs(actual) : fabs(actual - sum) / fabs(sum);
+            if (rel_err > 1e-1)
+            {
+                std::cout << "Q MISMATCH token=" << token_idx << " dim=" << j
+                          << " expected=" << sum << " got=" << actual
+                          << " rel_err=" << rel_err << "\n";
+                is_correct = false;
+            }
+        }
+    }
+    if (is_correct)
+    {
+        std::cout << "Q projection check done, all correct!" << std::endl;
+    }
+    else
+    {
+        std::cout << "Q projection check failed!" << std::endl;
+    }
+    return is_correct;
 }
 
 struct Weights
@@ -369,7 +412,9 @@ int main(int argc, char *argv[])
                                     CUBLAS_COMPUTE_32F,
                                     CUBLAS_GEMM_DEFAULT);
     cudaDeviceSynchronize();
-    std::cout << "Cublas first gemm status: " << gemm_status << std::endl;
+#ifdef DEBUG
+    verifyQProjection(gemm_status, input_tokens, q, model_weights_cpu, offsets, rms_norms);
+#endif
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();
