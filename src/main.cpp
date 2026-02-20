@@ -388,33 +388,96 @@ int main(int argc, char *argv[])
     std::cout << "cuBLAS initialized OK\n";
 #endif
 
-    __nv_bfloat16 *q;
-    cudaMalloc(&q, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-    float alpha = 1.0f;
-    float beta = 0.0f;
-    auto gemm_status = cublasGemmEx(cublas_handle,
-                                    CUBLAS_OP_T,
-                                    CUBLAS_OP_N,
-                                    EMBEDDING_LENGTH,
-                                    input_tokens.size(),
-                                    EMBEDDING_LENGTH,
-                                    &alpha,
-                                    weights.w_q[0],
-                                    CUDA_R_16BF,
-                                    EMBEDDING_LENGTH,
-                                    rms_norms,
-                                    CUDA_R_16BF,
-                                    EMBEDDING_LENGTH,
-                                    &beta,
-                                    q,
-                                    CUDA_R_16BF,
-                                    EMBEDDING_LENGTH,
-                                    CUBLAS_COMPUTE_32F,
-                                    CUBLAS_GEMM_DEFAULT);
+    // Q = inputs * wq^T; my matrices are row-major, cublas expects column-major
+    // it perceives my matrices as transposed
+    // there's a trick where C = A * B == C^T = B^T * A^T
+    // so in my scenario cublas sees now: Q = inputs^T * wq^T^T = inputs ^T * wq
+    // so I need to do: Q^T = wq ^T * inputs
+    // the beauty is that we don't need to transpose Q^T back to Q
+    // because cublas sees the output as column-major
+    // so it's in fact transposed
+    __nv_bfloat16 *q_proj;
+    cudaMalloc(&q_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    float q_proj_alpha = 1.0f;
+    float q_proj_beta = 0.0f;
+    auto q_proj_status = cublasGemmEx(cublas_handle,
+                                      CUBLAS_OP_T,
+                                      CUBLAS_OP_N,
+                                      EMBEDDING_LENGTH,
+                                      input_tokens.size(),
+                                      EMBEDDING_LENGTH,
+                                      &q_proj_alpha,
+                                      weights.w_q[0],
+                                      CUDA_R_16BF,
+                                      EMBEDDING_LENGTH,
+                                      rms_norms,
+                                      CUDA_R_16BF,
+                                      EMBEDDING_LENGTH,
+                                      &q_proj_beta,
+                                      q_proj,
+                                      CUDA_R_16BF,
+                                      EMBEDDING_LENGTH,
+                                      CUBLAS_COMPUTE_32F,
+                                      CUBLAS_GEMM_DEFAULT);
     cudaDeviceSynchronize();
 #ifdef DEBUG
-    verifyQProjection(gemm_status, input_tokens, q, model_weights_cpu, offsets, rms_norms);
+    verifyQProjection(q_proj_status, input_tokens, q_proj, model_weights_cpu, offsets, rms_norms);
 #endif
+
+    __nv_bfloat16 *k_proj;
+    cudaMalloc(&k_proj, input_tokens.size() * sizeof(__nv_bfloat16) * 512);
+    // input = (num_tokens, 2048), weights = (512, 2048)
+    // after trick: (512, 2048) * (2048, num_tokens) -> (512, num_tokens), which really is (num_tok, 512)
+    // lda: 2048, ldb: 2048, ldc: 512
+
+    float k_proj_alpha = 1.0f;
+    float k_proj_beta = 0.0f;
+    auto k_proj_status = cublasGemmEx(cublas_handle,
+                                      CUBLAS_OP_T,
+                                      CUBLAS_OP_N,
+                                      512,
+                                      input_tokens.size(),
+                                      EMBEDDING_LENGTH,
+                                      &k_proj_alpha,
+                                      weights.w_k[0],
+                                      CUDA_R_16BF,
+                                      EMBEDDING_LENGTH,
+                                      rms_norms,
+                                      CUDA_R_16BF,
+                                      EMBEDDING_LENGTH,
+                                      &k_proj_beta,
+                                      k_proj,
+                                      CUDA_R_16BF,
+                                      512,
+                                      CUBLAS_COMPUTE_32F,
+                                      CUBLAS_GEMM_DEFAULT);
+
+    // same as K projection
+    __nv_bfloat16 *v_proj;
+    cudaMalloc(&v_proj, input_tokens.size() * sizeof(__nv_bfloat16) * 512);
+
+    float v_proj_alpha = 1.0f;
+    float v_proj_beta = 0.0f;
+    auto v_proj_status = cublasGemmEx(cublas_handle,
+                                      CUBLAS_OP_T,
+                                      CUBLAS_OP_N,
+                                      512,
+                                      input_tokens.size(),
+                                      EMBEDDING_LENGTH,
+                                      &v_proj_alpha,
+                                      weights.w_v[0],
+                                      CUDA_R_16BF,
+                                      EMBEDDING_LENGTH,
+                                      rms_norms,
+                                      CUDA_R_16BF,
+                                      EMBEDDING_LENGTH,
+                                      &v_proj_beta,
+                                      v_proj,
+                                      CUDA_R_16BF,
+                                      512,
+                                      CUBLAS_COMPUTE_32F,
+                                      CUBLAS_GEMM_DEFAULT);
+
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();
