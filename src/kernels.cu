@@ -76,12 +76,12 @@ __global__ void ropeKernel(__nv_bfloat16 *input, int num_tokens, int proj_dim)
     if (2 * threadIdx.x + 1 + blockIdx.x * proj_dim < num_tokens * proj_dim)
     {
         int double_i = 2 * (threadIdx.x % 32);
-        float theta = 1.0 / (pow(500000.0, (double_i / HEAD_DIM)));
+        float theta = 1.0 / (pow(500000.0, ((float)double_i / HEAD_DIM)));
         float angle = blockIdx.x * theta;
         __nv_bfloat16 prev_2i = input[2 * threadIdx.x + blockIdx.x * proj_dim];
         __nv_bfloat16 prev_2i_1 = input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim];
-        input[2 * threadIdx.x + blockIdx.x * proj_dim] = (__nv_bfloat16)((float)prev_2i * cos(angle)) - (__nv_bfloat16)((float)prev_2i_1 * sin(angle));
-        input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim] = (__nv_bfloat16)((float)prev_2i * sin(angle)) + (__nv_bfloat16)((float)prev_2i_1 * cos(angle));
+        input[2 * threadIdx.x + blockIdx.x * proj_dim] = (__nv_bfloat16)((float)prev_2i * cos(angle) - (float)prev_2i_1 * sin(angle));
+        input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim] = (__nv_bfloat16)((float)prev_2i * sin(angle) + (float)prev_2i_1 * cos(angle));
     }
 }
 
