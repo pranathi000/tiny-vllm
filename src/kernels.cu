@@ -1,6 +1,8 @@
 #include "kernels.cuh"
 #include <iostream>
 
+constexpr int HEAD_DIM = 64;
+
 // gpu_input_tokens - N tokens
 // gpu_input_embeds - N * sizeof(__nv_bfloat16) * 2048
 // embed_tokens - (100000+smth, 2048)
@@ -60,6 +62,41 @@ __global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_
 void rmsNorm(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_bfloat16 *norm_weights, int num_tokens)
 {
     rmsNormKernel<<<num_tokens, 1024>>>(input, output, norm_weights, num_tokens);
+#ifdef DEBUG
+    auto error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+
+__global__ void ropeKernel(__nv_bfloat16 *input, int num_tokens, int proj_dim)
+{
+    if (2 * threadIdx.x + 1 + blockIdx.x * proj_dim < num_tokens * proj_dim)
+    {
+        int double_i = 2 * (threadIdx.x % 32);
+        float theta = 1.0 / (pow(500000.0, (double_i / HEAD_DIM)));
+        float angle = blockIdx.x * theta;
+        __nv_bfloat16 prev_2i = input[2 * threadIdx.x + blockIdx.x * proj_dim];
+        __nv_bfloat16 prev_2i_1 = input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim];
+        input[2 * threadIdx.x + blockIdx.x * proj_dim] = (__nv_bfloat16)((float)prev_2i * cos(angle)) - (__nv_bfloat16)((float)prev_2i_1 * sin(angle));
+        input[2 * threadIdx.x + 1 + blockIdx.x * proj_dim] = (__nv_bfloat16)((float)prev_2i * sin(angle)) + (__nv_bfloat16)((float)prev_2i_1 * cos(angle));
+    }
+}
+
+// proj_dim: q_proj 2048, k_proj 512
+// num_threads: I want to use it for both q_proj and k_proj so need to parameterize num_threads (1024 for q_proj and 512 for k_proj)
+void rope(__nv_bfloat16 *input, int num_tokens, int proj_dim)
+{
+    int num_threads = proj_dim / 2;
+    if (num_threads > 1024)
+    {
+        std::cout << "Can't launch more than 1024 threads on RTX 5090, RoPE kernel not launched";
+        return;
+    }
+
+    ropeKernel<<<num_tokens, num_threads>>>(input, num_tokens, proj_dim);
 #ifdef DEBUG
     auto error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)

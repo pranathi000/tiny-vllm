@@ -396,6 +396,7 @@ int main(int argc, char *argv[])
     // the beauty is that we don't need to transpose Q^T back to Q
     // because cublas sees the output as column-major
     // so it's in fact transposed
+    // final dim (num_tok, 2048)
     __nv_bfloat16 *q_proj;
     cudaMalloc(&q_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     float q_proj_alpha = 1.0f;
@@ -477,6 +478,11 @@ int main(int argc, char *argv[])
                                       512,
                                       CUBLAS_COMPUTE_32F,
                                       CUBLAS_GEMM_DEFAULT);
+
+    // RoPE now
+    rope(q_proj, input_tokens.size(), 2048);
+    rope(k_proj, input_tokens.size(), 512);
+    cudaDeviceSynchronize();
 
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
