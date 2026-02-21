@@ -11,6 +11,8 @@ using json = nlohmann::json;
 
 constexpr int N_LAYERS = 16; // TODO: hardcoded for llama 3.2 1B, just like any other value for now
 constexpr int EMBEDDING_LENGTH = 2048;
+constexpr int KV_DIM = 512;
+constexpr int HEAD_DIM = 64;
 
 int checkGPUStatus()
 {
@@ -84,16 +86,16 @@ bool verifyEmbeddingGather(std::vector<int> &input_tokens, nv_bfloat16 *input_em
     bool is_correct = true;
     for (int token = 0; token < input_tokens.size(); ++token)
     {
-        for (int i = 0; i < 2048; ++i)
+        for (int i = 0; i < EMBEDDING_LENGTH; ++i)
         {
             __nv_bfloat16 *all_embeds_cpu = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.embed_tokens.weight"));
-            if ((float)test_gpu_input_embeds[token * 2048 + i] != (float)all_embeds_cpu[input_tokens[token] * 2048 + i])
+            if ((float)test_gpu_input_embeds[token * EMBEDDING_LENGTH + i] != (float)all_embeds_cpu[input_tokens[token] * EMBEDDING_LENGTH + i])
             {
                 if (is_correct)
                 {
                     std::cout << "Incorrect embeddings were retrieved" << std::endl;
                 }
-                std::cout << "GPU:" << (float)test_gpu_input_embeds[token * 2048 + i] << " | CPU: " << (float)all_embeds_cpu[input_tokens[token] * 2048 + i] << "\n";
+                std::cout << "GPU:" << (float)test_gpu_input_embeds[token * EMBEDDING_LENGTH + i] << " | CPU: " << (float)all_embeds_cpu[input_tokens[token] * EMBEDDING_LENGTH + i] << "\n";
                 is_correct = false;
             }
         }
@@ -186,7 +188,7 @@ bool verifyQProjection(cublasStatus_t gemm_status, std::vector<int> &input_token
     __nv_bfloat16 *q_cpu_weights = (__nv_bfloat16 *)(model_weights_cpu.data() + offsets.at("model.layers.0.self_attn.q_proj.weight"));
     std::vector<__nv_bfloat16> rms_norms_cpu(input_tokens.size() * EMBEDDING_LENGTH);
     cudaMemcpy(rms_norms_cpu.data(), rms_norms, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-    // input_tokens * w_q^T (N, 2048) x (2048, 2048) -> (N, 2048)
+    // input_tokens * w_q^T (N, EMBEDDING_LENGTH) x (EMBEDDING_LENGTH, EMBEDDING_LENGTH) -> (N, EMBEDDING_LENGTH)
     bool is_correct = true;
     for (int token_idx = 0; token_idx < input_tokens.size(); ++token_idx)
     {
@@ -219,6 +221,92 @@ bool verifyQProjection(cublasStatus_t gemm_status, std::vector<int> &input_token
         std::cout << "Q projection check failed!" << std::endl;
     }
     return is_correct;
+}
+
+bool verifyRope(__nv_bfloat16 *gpu_q, __nv_bfloat16 *gpu_k,
+                std::vector<__nv_bfloat16> &q_before_rope,
+                std::vector<__nv_bfloat16> &k_before_rope,
+                int num_tokens)
+{
+    constexpr float TOLERANCE = 1e-2f;
+    constexpr float ROPE_THETA = 500000.0f;
+
+    std::vector<__nv_bfloat16> q_gpu(num_tokens * EMBEDDING_LENGTH);
+    std::vector<__nv_bfloat16> k_gpu(num_tokens * KV_DIM);
+    cudaMemcpy(q_gpu.data(), gpu_q, num_tokens * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    cudaMemcpy(k_gpu.data(), gpu_k, num_tokens * KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+
+    int mismatches = 0;
+
+    // Verify Q
+    for (int t = 0; t < num_tokens; ++t)
+    {
+        for (int pair = 0; pair < EMBEDDING_LENGTH / 2; ++pair)
+        {
+            int i = pair % (HEAD_DIM / 2);
+            float theta = 1.0f / powf(ROPE_THETA, (float)(2 * i) / HEAD_DIM);
+            float angle = t * theta;
+            float cos_a = cosf(angle);
+            float sin_a = sinf(angle);
+
+            int idx = t * EMBEDDING_LENGTH + 2 * pair;
+            float a = (float)q_before_rope[idx];
+            float b = (float)q_before_rope[idx + 1];
+            float expected_0 = a * cos_a - b * sin_a;
+            float expected_1 = a * sin_a + b * cos_a;
+            float actual_0 = (float)q_gpu[idx];
+            float actual_1 = (float)q_gpu[idx + 1];
+
+            float err0 = (expected_0 == 0.0f) ? fabsf(actual_0) : fabsf(actual_0 - expected_0) / fabsf(expected_0);
+            float err1 = (expected_1 == 0.0f) ? fabsf(actual_1) : fabsf(actual_1 - expected_1) / fabsf(expected_1);
+            if (err0 > TOLERANCE || err1 > TOLERANCE || isnanf(actual_0) || isnanf(actual_1))
+            {
+                if (mismatches < 10)
+                    std::cout << "Q RoPE MISMATCH token=" << t << " pair=" << pair
+                              << " expected=(" << expected_0 << "," << expected_1
+                              << ") got=(" << actual_0 << "," << actual_1 << ")\n";
+                mismatches++;
+            }
+        }
+    }
+
+    // Verify K
+    for (int t = 0; t < num_tokens; ++t)
+    {
+        for (int pair = 0; pair < KV_DIM / 2; ++pair)
+        {
+            int i = pair % (HEAD_DIM / 2);
+            float theta = 1.0f / powf(ROPE_THETA, (float)(2 * i) / HEAD_DIM);
+            float angle = t * theta;
+            float cos_a = cosf(angle);
+            float sin_a = sinf(angle);
+
+            int idx = t * KV_DIM + 2 * pair;
+            float a = (float)k_before_rope[idx];
+            float b = (float)k_before_rope[idx + 1];
+            float expected_0 = a * cos_a - b * sin_a;
+            float expected_1 = a * sin_a + b * cos_a;
+            float actual_0 = (float)k_gpu[idx];
+            float actual_1 = (float)k_gpu[idx + 1];
+
+            float err0 = (expected_0 == 0.0f) ? fabsf(actual_0) : fabsf(actual_0 - expected_0) / fabsf(expected_0);
+            float err1 = (expected_1 == 0.0f) ? fabsf(actual_1) : fabsf(actual_1 - expected_1) / fabsf(expected_1);
+            if (err0 > TOLERANCE || err1 > TOLERANCE || isnanf(actual_0) || isnanf(actual_1))
+            {
+                if (mismatches < 10)
+                    std::cout << "K RoPE MISMATCH token=" << t << " pair=" << pair
+                              << " expected=(" << expected_0 << "," << expected_1
+                              << ") got=(" << actual_0 << "," << actual_1 << ")\n";
+                mismatches++;
+            }
+        }
+    }
+
+    if (mismatches == 0)
+        std::cout << "RoPE verification PASSED\n";
+    else
+        std::cout << "RoPE verification FAILED: " << mismatches << " mismatches\n";
+    return mismatches == 0;
 }
 
 struct Weights
@@ -352,7 +440,7 @@ int main(int argc, char *argv[])
 #endif
     // INFERENCE STARTS HERE! =]
     // I have the same amount of embeddings as input tokens
-    // it's just every embedding is 2048 length bf16 vector
+    // it's just every embedding is EMBEDDING_LENGTH length bf16 vector
     // retrieved from model weights based on token's value
     __nv_bfloat16 *input_embeddings;
     cudaMalloc(&input_embeddings, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
@@ -396,7 +484,7 @@ int main(int argc, char *argv[])
     // the beauty is that we don't need to transpose Q^T back to Q
     // because cublas sees the output as column-major
     // so it's in fact transposed
-    // final dim (num_tok, 2048)
+    // final dim (num_tok, EMBEDDING_LENGTH)
     __nv_bfloat16 *q_proj;
     cudaMalloc(&q_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     float q_proj_alpha = 1.0f;
@@ -426,17 +514,17 @@ int main(int argc, char *argv[])
 #endif
 
     __nv_bfloat16 *k_proj;
-    cudaMalloc(&k_proj, input_tokens.size() * sizeof(__nv_bfloat16) * 512);
-    // input = (num_tokens, 2048), weights = (512, 2048)
-    // after trick: (512, 2048) * (2048, num_tokens) -> (512, num_tokens), which really is (num_tok, 512)
-    // lda: 2048, ldb: 2048, ldc: 512
+    cudaMalloc(&k_proj, input_tokens.size() * sizeof(__nv_bfloat16) * KV_DIM);
+    // input = (num_tokens, EMBEDDING_LENGTH), weights = (KV_DIM, EMBEDDING_LENGTH)
+    // after trick: (KV_DIM, EMBEDDING_LENGTH) * (EMBEDDING_LENGTH, num_tokens) -> (KV_DIM, num_tokens), which really is (num_tok, KV_DIM)
+    // lda: EMBEDDING_LENGTH, ldb: EMBEDDING_LENGTH, ldc: KV_DIM
 
     float k_proj_alpha = 1.0f;
     float k_proj_beta = 0.0f;
     auto k_proj_status = cublasGemmEx(cublas_handle,
                                       CUBLAS_OP_T,
                                       CUBLAS_OP_N,
-                                      512,
+                                      KV_DIM,
                                       input_tokens.size(),
                                       EMBEDDING_LENGTH,
                                       &k_proj_alpha,
@@ -449,20 +537,20 @@ int main(int argc, char *argv[])
                                       &k_proj_beta,
                                       k_proj,
                                       CUDA_R_16BF,
-                                      512,
+                                      KV_DIM,
                                       CUBLAS_COMPUTE_32F,
                                       CUBLAS_GEMM_DEFAULT);
 
     // same as K projection
     __nv_bfloat16 *v_proj;
-    cudaMalloc(&v_proj, input_tokens.size() * sizeof(__nv_bfloat16) * 512);
+    cudaMalloc(&v_proj, input_tokens.size() * sizeof(__nv_bfloat16) * KV_DIM);
 
     float v_proj_alpha = 1.0f;
     float v_proj_beta = 0.0f;
     auto v_proj_status = cublasGemmEx(cublas_handle,
                                       CUBLAS_OP_T,
                                       CUBLAS_OP_N,
-                                      512,
+                                      KV_DIM,
                                       input_tokens.size(),
                                       EMBEDDING_LENGTH,
                                       &v_proj_alpha,
@@ -475,14 +563,22 @@ int main(int argc, char *argv[])
                                       &v_proj_beta,
                                       v_proj,
                                       CUDA_R_16BF,
-                                      512,
+                                      KV_DIM,
                                       CUBLAS_COMPUTE_32F,
                                       CUBLAS_GEMM_DEFAULT);
 
     // RoPE now
-    rope(q_proj, input_tokens.size(), 2048);
-    rope(k_proj, input_tokens.size(), 512);
+
+    std::vector<__nv_bfloat16> q_before_rope(input_tokens.size() * EMBEDDING_LENGTH);
+    std::vector<__nv_bfloat16> k_before_rope(input_tokens.size() * KV_DIM);
+    cudaMemcpy(q_before_rope.data(), q_proj, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    cudaMemcpy(k_before_rope.data(), k_proj, input_tokens.size() * KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+
+    rope(q_proj, input_tokens.size(), EMBEDDING_LENGTH);
+    rope(k_proj, input_tokens.size(), KV_DIM);
     cudaDeviceSynchronize();
+
+    verifyRope(q_proj, k_proj, q_before_rope, k_before_rope, input_tokens.size());
 
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
