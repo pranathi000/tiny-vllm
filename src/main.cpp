@@ -727,8 +727,14 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
     cudaDeviceSynchronize();
     verifyAttnScores(q_proj, k_proj, attn_scores, input_tokens.size());
+    std::vector<__nv_bfloat16> scores_before_mask(input_tokens.size() * input_tokens.size() * NUM_Q_HEADS);
+    cudaMemcpy(scores_before_mask.data(), attn_scores, input_tokens.size() * input_tokens.size() * NUM_Q_HEADS * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
 #endif
     causalMask(attn_scores, input_tokens.size());
+#ifdef DEBUG
+    cudaDeviceSynchronize();
+    verifyCausalMask(attn_scores, scores_before_mask, input_tokens.size());
+#endif
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();
