@@ -5,3 +5,4 @@ void embeddingGather(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __n
 void rmsNorm(__nv_bfloat16 *input, __nv_bfloat16 *output, nv_bfloat16 *norm_weights, int num_tokens);
 void rope(__nv_bfloat16 *input, int num_tokens, int proj_dim);
 void causalMask(__nv_bfloat16 *input, int num_tokens);
+void softmax(__nv_bfloat16 *input, int num_tokens);

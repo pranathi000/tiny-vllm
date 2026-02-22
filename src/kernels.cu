@@ -23,7 +23,7 @@ void embeddingGather(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __n
     // even though embedding is 2048, I can only dispatch 1024 because it's max threads per block on my gpu
     embeddingGatherKernel<<<num_input_tokens, 1024>>>(gpu_input_tokens, gpu_input_embeds, embed_tokens, num_input_tokens);
 #ifdef DEBUG
-    auto error = cudaGetLastError();
+    cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
     {
         std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
@@ -64,7 +64,7 @@ void rmsNorm(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_bfloat16 *norm_we
 {
     rmsNormKernel<<<num_tokens, 1024>>>(input, output, norm_weights, num_tokens);
 #ifdef DEBUG
-    auto error = cudaGetLastError();
+    cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
     {
         std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
@@ -100,7 +100,7 @@ void rope(__nv_bfloat16 *input, int num_tokens, int proj_dim)
 
     ropeKernel<<<num_tokens, num_threads>>>(input, num_tokens, proj_dim);
 #ifdef DEBUG
-    auto error = cudaGetLastError();
+    cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
     {
         std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
@@ -133,7 +133,41 @@ void causalMask(__nv_bfloat16 *input, int num_tokens)
 
     causalMaskKernel<<<num_tokens * NUM_Q_HEADS, num_tokens>>>(input, num_tokens);
 #ifdef DEBUG
-    auto error = cudaGetLastError();
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+
+__global__ void softmaxKernel(__nv_bfloat16 *input, int num_tokens)
+{
+    if (threadIdx.x + blockIdx.x * blockDim.x >= num_tokens * num_tokens * NUM_Q_HEADS)
+    {
+        return;
+    }
+
+    int column = threadIdx.x;
+    int row = blockIdx.x % num_tokens;
+    if (column > row)
+    {
+        input[blockIdx.x * num_tokens + threadIdx.x] = -HUGE_VALF;
+    }
+}
+
+
+void softmax(__nv_bfloat16 *input, int num_tokens)
+{
+    if (num_tokens > 1024)
+    {
+        std::cout << "Can't launch more than 1024 threads on RTX 5090, Softmax kernel not launched";
+        return;
+    }
+
+    softmaxKernel<<<num_tokens * NUM_Q_HEADS, num_tokens>>>(input, num_tokens);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
     {
         std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;

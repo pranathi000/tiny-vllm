@@ -735,6 +735,7 @@ int main(int argc, char *argv[])
     cudaDeviceSynchronize();
     verifyCausalMask(attn_scores, scores_before_mask, input_tokens.size());
 #endif
+    softmax(attn_scores, input_tokens.size());
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();
