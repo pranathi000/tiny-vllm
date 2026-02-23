@@ -16,6 +16,7 @@ constexpr int HEAD_DIM = 64;
 constexpr int NUM_Q_HEADS = 32;
 constexpr int NUM_K_HEADS = 8;
 constexpr int GQA_Q_TO_K_RATIO = 4;
+constexpr int GQA_ATTN_SCORES_TO_V_RATIO = 4;
 
 int checkGPUStatus()
 {
@@ -813,6 +814,46 @@ int main(int argc, char *argv[])
     cudaDeviceSynchronize();
     verifySoftmax(attn_scores, scores_before_softmax, input_tokens.size());
 #endif
+
+    // attn scores * V
+    // GQA - 4 Q heads share 1 V head
+    // attn_scores dim (32, num_tok, num_tok)
+    // V dim (num_tok, 512)
+    // head size is 64
+    // V_head (num_tok, 64)
+    __nv_bfloat16 *attn_scores_v;
+    cudaMalloc(&attn_scores_v, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16));
+    float attn_scores_v_alpha = 1.0f;
+    float attn_scores_v_beta = 0.0f;
+
+    for (int i = 0; i < NUM_Q_HEADS; ++i)
+    {
+        int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
+        __nv_bfloat16 *attn_scores_head = attn_scores + i * input_tokens.size() * input_tokens.size();
+        __nv_bfloat16 *v_head = v_proj + v_head_idx * HEAD_DIM;
+        __nv_bfloat16 *output_attn_scores_head = attn_scores_v + i * HEAD_DIM;
+
+        cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
+                                                        CUBLAS_OP_N,
+                                                        CUBLAS_OP_N,
+                                                        HEAD_DIM,
+                                                        input_tokens.size(),
+                                                        input_tokens.size(),
+                                                        &attn_scores_v_alpha,
+                                                        v_head,
+                                                        CUDA_R_16BF,
+                                                        KV_DIM,
+                                                        attn_scores_head,
+                                                        CUDA_R_16BF,
+                                                        input_tokens.size(),
+                                                        &attn_scores_v_beta,
+                                                        output_attn_scores_head,
+                                                        CUDA_R_16BF,
+                                                        EMBEDDING_LENGTH,
+                                                        CUBLAS_COMPUTE_32F,
+                                                        CUBLAS_GEMM_DEFAULT);
+    }
+
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();
