@@ -410,6 +410,74 @@ bool verifyCausalMask(__nv_bfloat16 *gpu_scores, std::vector<__nv_bfloat16> &sco
     return mismatches == 0;
 }
 
+bool verifySoftmax(__nv_bfloat16 *gpu_scores, std::vector<__nv_bfloat16> &scores_before_softmax,
+                   int num_tokens)
+{
+    constexpr float TOLERANCE = 1e-2f;
+
+    std::vector<__nv_bfloat16> scores_cpu(num_tokens * num_tokens * NUM_Q_HEADS);
+    cudaMemcpy(scores_cpu.data(), gpu_scores, num_tokens * num_tokens * NUM_Q_HEADS * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+
+    int mismatches = 0;
+    for (int h = 0; h < NUM_Q_HEADS; ++h)
+    {
+        for (int row = 0; row < num_tokens; ++row)
+        {
+            int row_start = h * num_tokens * num_tokens + row * num_tokens;
+
+            // Find max of this row (from pre-softmax values)
+            float max_val = -HUGE_VALF;
+            for (int col = 0; col < num_tokens; ++col)
+            {
+                float val = (float)scores_before_softmax[row_start + col];
+                if (val > max_val)
+                    max_val = val;
+            }
+
+            // Compute exp and sum
+            float sum = 0.0f;
+            for (int col = 0; col < num_tokens; ++col)
+            {
+                sum += expf((float)scores_before_softmax[row_start + col] - max_val);
+            }
+
+            // Check each element
+            float row_sum = 0.0f;
+            for (int col = 0; col < num_tokens; ++col)
+            {
+                float expected = expf((float)scores_before_softmax[row_start + col] - max_val) / sum;
+                float actual = (float)scores_cpu[row_start + col];
+                row_sum += actual;
+
+                float rel_err = (expected == 0.0f) ? fabsf(actual) : fabsf(actual - expected) / fabsf(expected);
+                if (rel_err > TOLERANCE || isnanf(actual))
+                {
+                    if (mismatches < 10)
+                        std::cout << "SOFTMAX MISMATCH head=" << h << " row=" << row << " col=" << col
+                                  << " expected=" << expected << " got=" << actual
+                                  << " rel_err=" << rel_err << "\n";
+                    mismatches++;
+                }
+            }
+
+            // Each row should sum to ~1.0
+            if (fabsf(row_sum - 1.0f) > 0.05f)
+            {
+                if (mismatches < 10)
+                    std::cout << "SOFTMAX ROW SUM MISMATCH head=" << h << " row=" << row
+                              << " sum=" << row_sum << " (expected ~1.0)\n";
+                mismatches++;
+            }
+        }
+    }
+
+    if (mismatches == 0)
+        std::cout << "Softmax verification PASSED\n";
+    else
+        std::cout << "Softmax verification FAILED: " << mismatches << " mismatches\n";
+    return mismatches == 0;
+}
+
 struct Weights
 {
     __nv_bfloat16 *embed_tokens;
@@ -693,6 +761,7 @@ int main(int argc, char *argv[])
     // K_head (num_tok, 64)
     // attn_score_head = Q_head * K_head^T / sqrt(64)
     // so: head output dims (num_tok, num_tok)
+    // total output (32, num_tok, num_tok)
     __nv_bfloat16 *attn_scores;
     cudaMalloc(&attn_scores, input_tokens.size() * input_tokens.size() * sizeof(__nv_bfloat16) * NUM_Q_HEADS);
     float attn_alpha = 1.0f / 8.0f;
@@ -727,6 +796,7 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
     cudaDeviceSynchronize();
     verifyAttnScores(q_proj, k_proj, attn_scores, input_tokens.size());
+
     std::vector<__nv_bfloat16> scores_before_mask(input_tokens.size() * input_tokens.size() * NUM_Q_HEADS);
     cudaMemcpy(scores_before_mask.data(), attn_scores, input_tokens.size() * input_tokens.size() * NUM_Q_HEADS * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
 #endif
@@ -734,8 +804,15 @@ int main(int argc, char *argv[])
 #ifdef DEBUG
     cudaDeviceSynchronize();
     verifyCausalMask(attn_scores, scores_before_mask, input_tokens.size());
+
+    std::vector<__nv_bfloat16> scores_before_softmax(input_tokens.size() * input_tokens.size() * NUM_Q_HEADS);
+    cudaMemcpy(scores_before_softmax.data(), attn_scores, input_tokens.size() * input_tokens.size() * NUM_Q_HEADS * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
 #endif
     softmax(attn_scores, input_tokens.size());
+#ifdef DEBUG
+    cudaDeviceSynchronize();
+    verifySoftmax(attn_scores, scores_before_softmax, input_tokens.size());
+#endif
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();
