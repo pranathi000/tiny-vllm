@@ -203,3 +203,23 @@ void softmax(__nv_bfloat16 *input, int num_tokens)
     }
 #endif
 }
+
+__global__ void residualKernel(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds, int num_tokens)
+{
+    int workIndex = threadIdx.x + blockIdx.x * 2048;
+    input[workIndex] = input[workIndex] + input_embeds[workIndex];
+    input[workIndex + 1024] = input[workIndex + 1024] + input_embeds[workIndex + 1024];
+}
+
+// (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
+void residualAdd(__nv_bfloat16 *input, __nv_bfloat16 *input_embeds, int num_tokens)
+{
+    residualKernel<<<num_tokens, 1024>>>(input, input_embeds, num_tokens);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}

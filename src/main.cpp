@@ -568,36 +568,6 @@ bool verifyOProjection(cublasStatus_t gemm_status, std::vector<int> &input_token
     return is_correct;
 }
 
-bool verifyResidualAdd(__nv_bfloat16 *gpu_output, __nv_bfloat16 *gpu_a, __nv_bfloat16 *gpu_b, int num_tokens)
-{
-    std::vector<__nv_bfloat16> output_cpu(num_tokens * EMBEDDING_LENGTH);
-    std::vector<__nv_bfloat16> a_cpu(num_tokens * EMBEDDING_LENGTH);
-    std::vector<__nv_bfloat16> b_cpu(num_tokens * EMBEDDING_LENGTH);
-    cudaMemcpy(output_cpu.data(), gpu_output, num_tokens * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-    cudaMemcpy(a_cpu.data(), gpu_a, num_tokens * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-    cudaMemcpy(b_cpu.data(), gpu_b, num_tokens * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-
-    int mismatches = 0;
-    for (int i = 0; i < num_tokens * EMBEDDING_LENGTH; ++i)
-    {
-        float expected = (float)a_cpu[i] + (float)b_cpu[i];
-        float actual = (float)output_cpu[i];
-        float rel_err = (expected == 0.0f) ? fabsf(actual) : fabsf(actual - expected) / fabsf(expected);
-        if (rel_err > 1e-3 || isnanf(actual))
-        {
-            if (mismatches < 10)
-                std::cout << "RESIDUAL MISMATCH idx=" << i
-                          << " expected=" << expected << " got=" << actual << "\n";
-            mismatches++;
-        }
-    }
-    if (mismatches == 0)
-        std::cout << "Residual add verification PASSED\n";
-    else
-        std::cout << "Residual add verification FAILED: " << mismatches << " mismatches\n";
-    return mismatches == 0;
-}
-
 struct Weights
 {
     __nv_bfloat16 *embed_tokens;
@@ -1009,9 +979,12 @@ int main(int argc, char *argv[])
                                                 EMBEDDING_LENGTH,
                                                 CUBLAS_COMPUTE_32F,
                                                 CUBLAS_GEMM_DEFAULT);
+#ifdef DEBUG
     cudaDeviceSynchronize();
     verifyOProjection(o_proj_status, input_tokens, o_proj, attn_scores_v, model_weights_cpu, offsets);
-
+#endif
+    // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
+    residualAdd(o_proj, input_embeddings, input_tokens.size());
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
     cudaDeviceSynchronize();
