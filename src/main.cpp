@@ -15,6 +15,7 @@ constexpr int KV_DIM = 512;
 constexpr int HEAD_DIM = 64;
 constexpr int NUM_Q_HEADS = 32;
 constexpr int NUM_K_HEADS = 8;
+constexpr int NUM_V_HEADS = 8;
 constexpr int GQA_Q_TO_K_RATIO = 4;
 constexpr int GQA_ATTN_SCORES_TO_V_RATIO = 4;
 
@@ -479,6 +480,55 @@ bool verifySoftmax(__nv_bfloat16 *gpu_scores, std::vector<__nv_bfloat16> &scores
     return mismatches == 0;
 }
 
+bool verifyScoreTimesV(__nv_bfloat16 *gpu_scores, __nv_bfloat16 *gpu_v, __nv_bfloat16 *gpu_output,
+                       int num_tokens)
+{
+    constexpr float TOLERANCE = 1e-1f;
+
+    std::vector<__nv_bfloat16> scores_cpu(num_tokens * num_tokens * NUM_Q_HEADS);
+    std::vector<__nv_bfloat16> v_cpu(num_tokens * KV_DIM);
+    std::vector<__nv_bfloat16> output_cpu(num_tokens * EMBEDDING_LENGTH);
+    cudaMemcpy(scores_cpu.data(), gpu_scores, num_tokens * num_tokens * NUM_Q_HEADS * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    cudaMemcpy(v_cpu.data(), gpu_v, num_tokens * KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+    cudaMemcpy(output_cpu.data(), gpu_output, num_tokens * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
+
+    int mismatches = 0;
+    for (int h = 0; h < NUM_Q_HEADS; ++h)
+    {
+        int v_head = h / GQA_Q_TO_K_RATIO;
+        for (int t = 0; t < num_tokens; ++t)
+        {
+            for (int d = 0; d < HEAD_DIM; ++d)
+            {
+                float sum = 0.0f;
+                for (int t2 = 0; t2 < num_tokens; ++t2)
+                {
+                    float score = (float)scores_cpu[h * num_tokens * num_tokens + t * num_tokens + t2];
+                    float v_val = (float)v_cpu[t2 * KV_DIM + v_head * HEAD_DIM + d];
+                    sum += score * v_val;
+                }
+                float actual = (float)output_cpu[t * EMBEDDING_LENGTH + h * HEAD_DIM + d];
+
+                float rel_err = (sum == 0.0f) ? fabsf(actual) : fabsf(actual - sum) / fabsf(sum);
+                if (rel_err > TOLERANCE || isnanf(actual))
+                {
+                    if (mismatches < 10)
+                        std::cout << "SCORE*V MISMATCH head=" << h << " token=" << t << " dim=" << d
+                                  << " expected=" << sum << " got=" << actual
+                                  << " rel_err=" << rel_err << "\n";
+                    mismatches++;
+                }
+            }
+        }
+    }
+
+    if (mismatches == 0)
+        std::cout << "Score*V verification PASSED\n";
+    else
+        std::cout << "Score*V verification FAILED: " << mismatches << " mismatches\n";
+    return mismatches == 0;
+}
+
 struct Weights
 {
     __nv_bfloat16 *embed_tokens;
@@ -816,11 +866,15 @@ int main(int argc, char *argv[])
 #endif
 
     // attn scores * V
+    // (32, num_tok, num_tok) * (num_tok, 512)
     // GQA - 4 Q heads share 1 V head
     // attn_scores dim (32, num_tok, num_tok)
+    // attn_scores head dim (num_tok, num_tok)
     // V dim (num_tok, 512)
-    // head size is 64
-    // V_head (num_tok, 64)
+    // NUM_V_HEADS is 8 -> 512 / 8 = 64
+    // V_head dim (num_tok, 64)
+    // output head dim: scores head * V head -> (num_tok, num_tok) * (num_tok, 64) = (num_tok, 64)
+    // in total 32 output heads: so (num_tok, 64 * 32) = (num_tok, 2048)
     __nv_bfloat16 *attn_scores_v;
     cudaMalloc(&attn_scores_v, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16));
     float attn_scores_v_alpha = 1.0f;
@@ -829,6 +883,7 @@ int main(int argc, char *argv[])
     for (int i = 0; i < NUM_Q_HEADS; ++i)
     {
         int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
+        // i * input_tokens.size() * input_tokens.size(),  because attn scores is (32, num_tok, num_tok)
         __nv_bfloat16 *attn_scores_head = attn_scores + i * input_tokens.size() * input_tokens.size();
         __nv_bfloat16 *v_head = v_proj + v_head_idx * HEAD_DIM;
         __nv_bfloat16 *output_attn_scores_head = attn_scores_v + i * HEAD_DIM;
@@ -853,6 +908,10 @@ int main(int argc, char *argv[])
                                                         CUBLAS_COMPUTE_32F,
                                                         CUBLAS_GEMM_DEFAULT);
     }
+#ifdef DEBUG
+    cudaDeviceSynchronize();
+    verifyScoreTimesV(attn_scores, v_proj, attn_scores_v, input_tokens.size());
+#endif
 
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
