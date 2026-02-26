@@ -646,12 +646,13 @@ int main(int argc, char *argv[])
     safetensors_file.read(model_weights_cpu.data(), max_offset);
 
     cudaMemcpy(model_weights, model_weights_cpu.data(), max_offset, cudaMemcpyHostToDevice);
+#ifdef DEBUG
     if (!verifyModelWeightsCopy(model_weights, model_weights_cpu))
     {
         return 1;
     }
+#endif
     safetensors_file.close();
-
     // BASICALLY A HELPER STRUCT TO HAVE AN EASY ACCESS TO ANY MODEL WEIGHTS ON GPU
     // TODO: right now I know the model structure since it's always llama 3.2 1B-Instruct, but maybe it would be convenient
     //       to store dimensions somewhere for even easier access?
@@ -730,10 +731,56 @@ int main(int argc, char *argv[])
     cudaMalloc(&hidden_state, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     cudaMemcpy(hidden_state, input_embeddings, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
 
+    __nv_bfloat16 *rms_norms;
+    cudaMalloc(&rms_norms, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+
+    __nv_bfloat16 *q_proj;
+    cudaMalloc(&q_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    float q_proj_alpha = 1.0f;
+    float q_proj_beta = 0.0f;
+
+    __nv_bfloat16 *k_proj;
+    cudaMalloc(&k_proj, input_tokens.size() * sizeof(__nv_bfloat16) * KV_DIM);
+    float k_proj_alpha = 1.0f;
+    float k_proj_beta = 0.0f;
+
+    __nv_bfloat16 *v_proj;
+    cudaMalloc(&v_proj, input_tokens.size() * sizeof(__nv_bfloat16) * KV_DIM);
+    float v_proj_alpha = 1.0f;
+    float v_proj_beta = 0.0f;
+
+    __nv_bfloat16 *attn_scores;
+    cudaMalloc(&attn_scores, input_tokens.size() * input_tokens.size() * sizeof(__nv_bfloat16) * NUM_Q_HEADS);
+    float attn_alpha = 1.0f / 8.0f;
+    float attn_beta = 0.0f;
+
+    __nv_bfloat16 *attn_scores_v;
+    cudaMalloc(&attn_scores_v, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16));
+    float attn_scores_v_alpha = 1.0f;
+    float attn_scores_v_beta = 0.0f;
+
+    __nv_bfloat16 *o_proj;
+    cudaMalloc(&o_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    float o_proj_alpha = 1.0f;
+    float o_proj_beta = 0.0f;
+
+    __nv_bfloat16 *gate;
+    cudaMalloc(&gate, input_tokens.size() * sizeof(__nv_bfloat16) * HIDDEN_DIM);
+    float gate_alpha = 1.0f;
+    float gate_beta = 0.0f;
+
+    __nv_bfloat16 *up;
+    cudaMalloc(&up, input_tokens.size() * sizeof(__nv_bfloat16) * HIDDEN_DIM);
+    float up_alpha = 1.0f;
+    float up_beta = 0.0f;
+
+    __nv_bfloat16 *down;
+    cudaMalloc(&down, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    float down_alpha = 1.0f;
+    float down_beta = 0.0f;
+
     for (int layer = 0; layer < 16; ++layer)
     {
-        __nv_bfloat16 *rms_norms;
-        cudaMalloc(&rms_norms, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
         rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], input_tokens.size());
 #ifdef DEBUG
         cudaDeviceSynchronize();
@@ -757,10 +804,6 @@ int main(int argc, char *argv[])
         // because cublas sees the output as column-major
         // so it's in fact transposed
         // final dim (num_tok, EMBEDDING_LENGTH)
-        __nv_bfloat16 *q_proj;
-        cudaMalloc(&q_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-        float q_proj_alpha = 1.0f;
-        float q_proj_beta = 0.0f;
         cublasStatus_t q_proj_status = cublasGemmEx(cublas_handle,
                                                     CUBLAS_OP_T,
                                                     CUBLAS_OP_N,
@@ -785,14 +828,9 @@ int main(int argc, char *argv[])
         verifyQProjection(q_proj_status, input_tokens, q_proj, model_weights_cpu, offsets, rms_norms, layer);
 #endif
 
-        __nv_bfloat16 *k_proj;
-        cudaMalloc(&k_proj, input_tokens.size() * sizeof(__nv_bfloat16) * KV_DIM);
         // input = (num_tokens, EMBEDDING_LENGTH), weights = (KV_DIM, EMBEDDING_LENGTH)
         // after trick: (KV_DIM, EMBEDDING_LENGTH) * (EMBEDDING_LENGTH, num_tokens) -> (KV_DIM, num_tokens), which really is (num_tok, KV_DIM)
         // lda: EMBEDDING_LENGTH, ldb: EMBEDDING_LENGTH, ldc: KV_DIM
-
-        float k_proj_alpha = 1.0f;
-        float k_proj_beta = 0.0f;
         cublasStatus_t k_proj_status = cublasGemmEx(cublas_handle,
                                                     CUBLAS_OP_T,
                                                     CUBLAS_OP_N,
@@ -814,11 +852,6 @@ int main(int argc, char *argv[])
                                                     CUBLAS_GEMM_DEFAULT);
 
         // same as K projection
-        __nv_bfloat16 *v_proj;
-        cudaMalloc(&v_proj, input_tokens.size() * sizeof(__nv_bfloat16) * KV_DIM);
-
-        float v_proj_alpha = 1.0f;
-        float v_proj_beta = 0.0f;
         cublasStatus_t v_proj_status = cublasGemmEx(cublas_handle,
                                                     CUBLAS_OP_T,
                                                     CUBLAS_OP_N,
@@ -865,10 +898,6 @@ int main(int argc, char *argv[])
         // attn_score_head = Q_head * K_head^T / sqrt(64)
         // so: head output dims (num_tok, num_tok)
         // total output (32, num_tok, num_tok)
-        __nv_bfloat16 *attn_scores;
-        cudaMalloc(&attn_scores, input_tokens.size() * input_tokens.size() * sizeof(__nv_bfloat16) * NUM_Q_HEADS);
-        float attn_alpha = 1.0f / 8.0f;
-        float attn_beta = 0.0f;
         for (int i = 0; i < NUM_Q_HEADS; ++i)
         {
             int k_head_idx = i / GQA_Q_TO_K_RATIO;
@@ -927,11 +956,6 @@ int main(int argc, char *argv[])
         // V_head dim (num_tok, 64)
         // output head dim: scores head * V head -> (num_tok, num_tok) * (num_tok, 64) = (num_tok, 64)
         // in total 32 output heads: so (num_tok, 64 * 32) = (num_tok, 2048)
-        __nv_bfloat16 *attn_scores_v;
-        cudaMalloc(&attn_scores_v, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16));
-        float attn_scores_v_alpha = 1.0f;
-        float attn_scores_v_beta = 0.0f;
-
         for (int i = 0; i < NUM_Q_HEADS; ++i)
         {
             int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
@@ -969,10 +993,6 @@ int main(int argc, char *argv[])
         // attn_scores_v * w_o^T
         // (num_tok, 2048) * (2048, 2048) -> (num_tok, 2048)
         // same as Q projection, so copy paste
-        __nv_bfloat16 *o_proj;
-        cudaMalloc(&o_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-        float o_proj_alpha = 1.0f;
-        float o_proj_beta = 0.0f;
         cublasStatus_t o_proj_status = cublasGemmEx(cublas_handle,
                                                     CUBLAS_OP_T,
                                                     CUBLAS_OP_N,
@@ -1013,10 +1033,6 @@ int main(int argc, char *argv[])
         // but data is perceived as column major so I need to transpose mlp_gate_proj
         // to make it work
         // m 8192 n num_tok k 2048 lda 2048 ldb 2048 ldc 8192
-        __nv_bfloat16 *gate;
-        cudaMalloc(&gate, input_tokens.size() * sizeof(__nv_bfloat16) * HIDDEN_DIM);
-        float gate_alpha = 1.0f;
-        float gate_beta = 0.0f;
         cublasStatus_t gate_status = cublasGemmEx(cublas_handle,
                                                   CUBLAS_OP_T,
                                                   CUBLAS_OP_N,
@@ -1038,10 +1054,6 @@ int main(int argc, char *argv[])
                                                   CUBLAS_GEMM_DEFAULT);
 
         // up, the same dims as gate
-        __nv_bfloat16 *up;
-        cudaMalloc(&up, input_tokens.size() * sizeof(__nv_bfloat16) * HIDDEN_DIM);
-        float up_alpha = 1.0f;
-        float up_beta = 0.0f;
         cublasStatus_t up_status = cublasGemmEx(cublas_handle,
                                                 CUBLAS_OP_T,
                                                 CUBLAS_OP_N,
@@ -1077,10 +1089,6 @@ int main(int argc, char *argv[])
         // dims = (2048, 8192) * (8192, num_tok) = (2048, num_tok)
         // m: 2048 n: num_tok, k: 8192
         // lda: 8192, ldb: 8192, ldc: 2048
-        __nv_bfloat16 *down;
-        cudaMalloc(&down, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-        float down_alpha = 1.0f;
-        float down_beta = 0.0f;
         cublasStatus_t down_status = cublasGemmEx(cublas_handle,
                                                   CUBLAS_OP_T,
                                                   CUBLAS_OP_N,
