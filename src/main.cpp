@@ -219,7 +219,7 @@ bool verifyQProjection(cublasStatus_t gemm_status, std::vector<int> &input_token
             {
                 std::cout << "Q MISMATCH token=" << token_idx << " dim=" << j
                           << " expected=" << sum << " got=" << actual
-                          << " rel_err=" << rel_err << "\n";
+                          << " rel_err=" << rel_err << " layer=" << layer << std::endl;
                 is_correct = false;
             }
         }
@@ -1150,6 +1150,25 @@ int main(int argc, char *argv[])
                                                VOCAB_SIZE,
                                                CUBLAS_COMPUTE_32F,
                                                CUBLAS_GEMM_DEFAULT);
+
+    std::vector<__nv_bfloat16> embed_proj_cpu;
+    embed_proj_cpu.resize(input_tokens.size() * VOCAB_SIZE);
+    cudaMemcpy(embed_proj_cpu.data(), embed_proj, sizeof(__nv_bfloat16) * input_tokens.size() * VOCAB_SIZE, cudaMemcpyDeviceToHost);
+    // argmax to get the output token
+    // TODO: write a proper kernel for it
+    // for now just a simple CPU function
+    int last_token_offset = (input_tokens.size() - 1) * VOCAB_SIZE;
+    __nv_bfloat16 max_token = embed_proj_cpu[last_token_offset];
+    int max_token_idx = 0;
+    for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
+    {
+        if (embed_proj_cpu[token_idx + last_token_offset] > max_token)
+        {
+            max_token = embed_proj_cpu[token_idx + last_token_offset];
+            max_token_idx = token_idx;
+        }
+    }
+    std::cout << "Output token: " << (float)max_token << ", token index: " << std::to_string(max_token_idx) << std::endl;
 
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);

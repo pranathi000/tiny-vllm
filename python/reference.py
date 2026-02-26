@@ -74,6 +74,11 @@ def main():
         print(f"  k_proj: {layer0.self_attn.k_proj.weight.shape}")
         print(f"  v_proj: {layer0.self_attn.v_proj.weight.shape}")
         print(f"  o_proj: {layer0.self_attn.o_proj.weight.shape}")
+        output = model(input_ids)
+        logits = output.logits[0, -1, :]  # last token's logits
+        predicted = torch.argmax(logits).item()
+        print(f"Predicted token ID: {predicted}")
+        print(f"Decoded: {tokenizer.decode([predicted])}")
 
 
 if __name__ == "__main__":
