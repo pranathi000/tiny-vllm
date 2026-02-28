@@ -738,7 +738,7 @@ int main(int argc, char *argv[])
     __nv_bfloat16 *rms_norms;
     cudaMalloc(&rms_norms, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
 
-    __nv_bfloat16 *q_proj;
+    __nv_bfloat16 *q_proj; // TODO: rename smth generic like buf_2048 and share it between q_proj and attn_scores_v
     cudaMalloc(&q_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     float q_proj_alpha = 1.0f;
     float q_proj_beta = 0.0f;
@@ -763,7 +763,7 @@ int main(int argc, char *argv[])
     float attn_scores_v_alpha = 1.0f;
     float attn_scores_v_beta = 0.0f;
 
-    __nv_bfloat16 *o_proj;
+    __nv_bfloat16 *o_proj; // TODO: also share with down (probably)
     cudaMalloc(&o_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     float o_proj_alpha = 1.0f;
     float o_proj_beta = 0.0f;
