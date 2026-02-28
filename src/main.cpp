@@ -1028,8 +1028,7 @@ int main(int argc, char *argv[])
         verifyOProjection(o_proj_status, input_tokens, o_proj, attn_scores_v, model_weights_cpu, offsets, layer);
 #endif
         // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
-        residualAdd(o_proj, hidden_state, input_tokens.size());
-        hidden_state = o_proj;
+        residualAdd(hidden_state, o_proj, input_tokens.size());
         // post attention RMS Norm
         rmsNorm(hidden_state, rms_norms, weights.post_attn_layernorms[layer], input_tokens.size());
 
