@@ -763,8 +763,9 @@ int main(int argc, char *argv[])
     float attn_scores_v_alpha = 1.0f;
     float attn_scores_v_beta = 0.0f;
 
-    __nv_bfloat16 *o_proj; // TODO: also share with down (probably)
-    cudaMalloc(&o_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    __nv_bfloat16 *buf_2048_2; // TODO: share with o_proj and down
+    cudaMalloc(&buf_2048_2, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    __nv_bfloat16 *o_proj;
     float o_proj_alpha = 1.0f;
     float o_proj_beta = 0.0f;
 
@@ -779,7 +780,6 @@ int main(int argc, char *argv[])
     float up_beta = 0.0f;
 
     __nv_bfloat16 *down;
-    cudaMalloc(&down, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     float down_alpha = 1.0f;
     float down_beta = 0.0f;
 
@@ -1006,6 +1006,7 @@ int main(int argc, char *argv[])
         // attn_scores_v * w_o^T
         // (num_tok, 2048) * (2048, 2048) -> (num_tok, 2048)
         // same as Q projection, so copy paste
+        o_proj = buf_2048_2;
         cublasStatus_t o_proj_status = cublasGemmEx(cublas_handle,
                                                     CUBLAS_OP_T,
                                                     CUBLAS_OP_N,
@@ -1101,6 +1102,7 @@ int main(int argc, char *argv[])
         // dims = (2048, 8192) * (8192, num_tok) = (2048, num_tok)
         // m: 2048 n: num_tok, k: 8192
         // lda: 8192, ldb: 8192, ldc: 2048
+        down = buf_2048_2;
         cublasStatus_t down_status = cublasGemmEx(cublas_handle,
                                                   CUBLAS_OP_T,
                                                   CUBLAS_OP_N,
