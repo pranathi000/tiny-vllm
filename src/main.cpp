@@ -738,8 +738,9 @@ int main(int argc, char *argv[])
     __nv_bfloat16 *rms_norms;
     cudaMalloc(&rms_norms, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
 
-    __nv_bfloat16 *q_proj; // TODO: rename smth generic like buf_2048 and share it between q_proj and attn_scores_v
-    cudaMalloc(&q_proj, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    __nv_bfloat16 *buf_2048_1; // shared between q_proj and attn_scores_v
+    cudaMalloc(&buf_2048_1, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    __nv_bfloat16 *q_proj;
     float q_proj_alpha = 1.0f;
     float q_proj_beta = 0.0f;
 
@@ -759,7 +760,6 @@ int main(int argc, char *argv[])
     float attn_beta = 0.0f;
 
     __nv_bfloat16 *attn_scores_v;
-    cudaMalloc(&attn_scores_v, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16));
     float attn_scores_v_alpha = 1.0f;
     float attn_scores_v_beta = 0.0f;
 
@@ -815,6 +815,7 @@ int main(int argc, char *argv[])
         // because cublas sees the output as column-major
         // so it's in fact transposed
         // final dim (num_tok, EMBEDDING_LENGTH)
+        q_proj = buf_2048_1;
         cublasStatus_t q_proj_status = cublasGemmEx(cublas_handle,
                                                     CUBLAS_OP_T,
                                                     CUBLAS_OP_N,
@@ -967,6 +968,7 @@ int main(int argc, char *argv[])
         // V_head dim (num_tok, 64)
         // output head dim: scores head * V head -> (num_tok, num_tok) * (num_tok, 64) = (num_tok, 64)
         // in total 32 output heads: so (num_tok, 64 * 32) = (num_tok, 2048)
+        attn_scores_v = buf_2048_1;
         for (int i = 0; i < NUM_Q_HEADS; ++i)
         {
             int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
