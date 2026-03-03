@@ -1198,7 +1198,71 @@ int main(int argc, char *argv[])
     while (last_generated_token != END_OF_TEXT_TOKEN_ID && last_generated_token != EOT_ID_TOKEN_ID && current_token_position < MAX_SEQ_LEN)
     {
         // TODO: make it more suitable for single token operations, perhaps just pass a token id as param
-        singleEmbeddingGather(last_generated_token, input_embeddings, weights.embed_tokens);
+        singleEmbeddingGather(last_generated_token, hidden_state, weights.embed_tokens);
+        for (int layer = 0; layer < N_LAYERS; ++layer)
+        {
+            rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], 1);
+            q_proj = buf_2048_1;
+            cublasGemmEx(cublas_handle,
+                         CUBLAS_OP_T,
+                         CUBLAS_OP_N,
+                         EMBEDDING_LENGTH,
+                         1,
+                         EMBEDDING_LENGTH,
+                         &q_proj_alpha,
+                         weights.w_q[layer],
+                         CUDA_R_16BF,
+                         EMBEDDING_LENGTH,
+                         rms_norms,
+                         CUDA_R_16BF,
+                         EMBEDDING_LENGTH,
+                         &q_proj_beta,
+                         q_proj,
+                         CUDA_R_16BF,
+                         EMBEDDING_LENGTH,
+                         CUBLAS_COMPUTE_32F,
+                         CUBLAS_GEMM_DEFAULT);
+            cublasGemmEx(cublas_handle,
+                         CUBLAS_OP_T,
+                         CUBLAS_OP_N,
+                         KV_DIM,
+                         1,
+                         EMBEDDING_LENGTH,
+                         &k_proj_alpha,
+                         weights.w_k[layer],
+                         CUDA_R_16BF,
+                         EMBEDDING_LENGTH,
+                         rms_norms,
+                         CUDA_R_16BF,
+                         EMBEDDING_LENGTH,
+                         &k_proj_beta,
+                         k_proj,
+                         CUDA_R_16BF,
+                         KV_DIM,
+                         CUBLAS_COMPUTE_32F,
+                         CUBLAS_GEMM_DEFAULT);
+            cublasGemmEx(cublas_handle,
+                         CUBLAS_OP_T,
+                         CUBLAS_OP_N,
+                         KV_DIM,
+                         1,
+                         EMBEDDING_LENGTH,
+                         &v_proj_alpha,
+                         weights.w_v[layer],
+                         CUDA_R_16BF,
+                         EMBEDDING_LENGTH,
+                         rms_norms,
+                         CUDA_R_16BF,
+                         EMBEDDING_LENGTH,
+                         &v_proj_beta,
+                         v_proj,
+                         CUDA_R_16BF,
+                         KV_DIM,
+                         CUBLAS_COMPUTE_32F,
+                         CUBLAS_GEMM_DEFAULT);
+            rope(q_proj, 1, EMBEDDING_LENGTH);
+            rope(k_proj[layer], 1, KV_DIM);
+        }
     }
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
