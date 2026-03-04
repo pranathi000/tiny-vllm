@@ -291,7 +291,7 @@ void ropeDecode(__nv_bfloat16 *input, int offset, int proj_dim)
         return;
     }
 
-    ropeKernel<<<1, num_threads>>>(input, offset, proj_dim);
+    ropeKernelDecode<<<1, num_threads>>>(input, offset, proj_dim);
 #ifdef DEBUG
     cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)
