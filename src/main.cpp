@@ -1295,7 +1295,7 @@ int main(int argc, char *argv[])
                              CUBLAS_COMPUTE_32F,
                              CUBLAS_GEMM_DEFAULT);
             }
-            softmaxDecode(attn_scores, 1);
+            softmaxDecode(attn_scores, seq_len);
 
             attn_scores_v = buf_2048_1;
             for (int i = 0; i < NUM_Q_HEADS; ++i)
