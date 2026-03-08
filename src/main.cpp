@@ -682,68 +682,65 @@ int main(int argc, char *argv[])
     }
 
     // LLM INPUT
-    std::vector<int> input_tokens; // TODO: it's no longer input tokens only, but input tokens + generated tokens, so rename soon to something more relevant, maybe just "tokens" would be better
-    // or maybe have two separate vector, I don't know yet
+    std::vector<int> input_tokens;   // all tokens from all batch items concatenated
+    std::vector<int> prompt_offsets; // indicate where the next prompt starts - same size as prompt_lengths, they have to match by index
+    std::vector<int> prompt_lengths; // indicates length of each prompt
+    int input_tokens_size;
     // int token;
     // while (std::cin >> token)
     // {
     //     input_tokens.push_back(token);
     // }
-    std::vector<std::vector<int>> inputs;
-    std::vector<int> first_prompt;
-    first_prompt.push_back(128000);
-    first_prompt.push_back(791);
-    first_prompt.push_back(6864);
-    first_prompt.push_back(315);
-    first_prompt.push_back(9822);
-    first_prompt.push_back(374);
-    inputs.push_back(first_prompt);
+    // TODO: right now I handle input manually, it's the least interesting part, will come back to it when continuous batching and pagedattn works
+    // FIRST PROMPT
+    input_tokens.push_back(128000);
+    input_tokens.push_back(791);
+    input_tokens.push_back(6864);
+    input_tokens.push_back(315);
+    input_tokens.push_back(9822);
+    input_tokens.push_back(374);
+    prompt_offsets.push_back(0);
+    prompt_lengths.push_back(6);
 
-    std::vector<int> second_prompt;
-    second_prompt.push_back(128000);
-    second_prompt.push_back(791);
-    second_prompt.push_back(11495);
-    second_prompt.push_back(33084);
-    second_prompt.push_back(13962);
-    second_prompt.push_back(3363);
-    second_prompt.push_back(374);
-    inputs.push_back(second_prompt);
+    // SECOND PROMPT
+    input_tokens.push_back(128000);
+    input_tokens.push_back(791);
+    input_tokens.push_back(11495);
+    input_tokens.push_back(33084);
+    input_tokens.push_back(13962);
+    input_tokens.push_back(3363);
+    input_tokens.push_back(374);
+    prompt_offsets.push_back(6);
+    prompt_lengths.push_back(7);
 
-    std::vector<int> third_prompt;
-    third_prompt.push_back(128000);
-    third_prompt.push_back(15000);
-    third_prompt.push_back(819);
-    third_prompt.push_back(1183);
-    third_prompt.push_back(62791);
-    third_prompt.push_back(17610);
-    third_prompt.push_back(315);
-    third_prompt.push_back(25);
-    inputs.push_back(third_prompt);
+    // THIRD PROMPT
+    input_tokens.push_back(128000);
+    input_tokens.push_back(15000);
+    input_tokens.push_back(819);
+    input_tokens.push_back(1183);
+    input_tokens.push_back(62791);
+    input_tokens.push_back(17610);
+    input_tokens.push_back(315);
+    input_tokens.push_back(25);
+    prompt_offsets.push_back(14);
+    prompt_lengths.push_back(8);
 
-    std::vector<int> fourth_prompt;
-    fourth_prompt.push_back(128000);
-    fourth_prompt.push_back(47);
-    fourth_prompt.push_back(9700);
-    fourth_prompt.push_back(3458);
-    fourth_prompt.push_back(19699);
-    fourth_prompt.push_back(9686);
-    fourth_prompt.push_back(54485);
-    fourth_prompt.push_back(220);
-    inputs.push_back(fourth_prompt);
+    // FOURTH PROMPT
+    input_tokens.push_back(128000);
+    input_tokens.push_back(47);
+    input_tokens.push_back(9700);
+    input_tokens.push_back(3458);
+    input_tokens.push_back(19699);
+    input_tokens.push_back(9686);
+    input_tokens.push_back(54485);
+    input_tokens.push_back(220);
+    prompt_offsets.push_back(22);
+    prompt_lengths.push_back(8);
 
-    int num_inputs = inputs.size();
-    int max_input_len = first_prompt.size();
-    int max_input_idx = 0;
-    int batched_inputs_size = first_prompt.size();
-    for (int i = 1; i < num_inputs; ++i)
-    {
-        batched_inputs_size += inputs[i].size();
-        if (inputs[i].size() > max_input_len)
-        {
-            max_input_len = inputs[i].size();
-            max_input_idx = i;
-        }
-    }
+    input_tokens_size = input_tokens.size();
+    int max_input_len = 8;                                      // yes, I set it manualy for now. TODO automate it
+    int num_prompts = 4;                                        // same
+    int max_buffer_size = std::max(max_input_len, num_prompts); // it will make sense once the aboves are not hardcoded
 
 #ifdef DEBUG
     std::cout << "Input tokens:\n";
@@ -753,8 +750,8 @@ int main(int argc, char *argv[])
     }
 #endif
     int *gpu_input_tokens;
-    cudaMalloc(&gpu_input_tokens, batched_inputs_size * sizeof(int));
-    cudaMemcpy(gpu_input_tokens, input_tokens.data(), batched_inputs_size * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc(&gpu_input_tokens, input_tokens_size * sizeof(int));
+    cudaMemcpy(gpu_input_tokens, input_tokens.data(), input_tokens_size * sizeof(int), cudaMemcpyHostToDevice);
 #ifdef DEBUG
     if (!verifyInputTokensCopy(input_tokens, gpu_input_tokens))
     {
@@ -767,7 +764,7 @@ int main(int argc, char *argv[])
     // retrieved from model weights based on token's value
 
     __nv_bfloat16 *input_embeddings;
-    cudaMalloc(&input_embeddings, batched_inputs_size * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    cudaMalloc(&input_embeddings, input_tokens_size * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, input_tokens.size());
 #ifdef DEBUG
     cudaDeviceSynchronize();
@@ -785,11 +782,11 @@ int main(int argc, char *argv[])
     }
 
     __nv_bfloat16 *hidden_state;
-    cudaMalloc(&hidden_state, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-    cudaMemcpy(hidden_state, input_embeddings, input_tokens.size() * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
+    cudaMalloc(&hidden_state, max_buffer_size * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    cudaMemcpy(hidden_state, input_embeddings, max_buffer_size * EMBEDDING_LENGTH * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
 
     __nv_bfloat16 *rms_norms;
-    cudaMalloc(&rms_norms, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    cudaMalloc(&rms_norms, max_buffer_size * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
 
     __nv_bfloat16 *buf_2048_1; // shared between q_proj and attn_scores_v
     cudaMalloc(&buf_2048_1, input_tokens.size() * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
