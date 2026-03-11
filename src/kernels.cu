@@ -243,20 +243,21 @@ void silu(__nv_bfloat16 *a, __nv_bfloat16 *b, int num_tokens)
 }
 
 // decode
-__global__ void embeddingGatherKernelDecode(int input_token, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens)
+__global__ void embeddingGatherKernelDecode(int *gpu_last_tokens, int num_tokens, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens)
 {
-    int workIndex = threadIdx.x;
-    if (workIndex < 2048)
+    int input_token = gpu_last_tokens[blockIdx.x];
+    int workIndex = blockIdx.x * 2048 + threadIdx.x;
+    if (workIndex < num_tokens * 2048)
     {
         output[workIndex] = embed_tokens[input_token * 2048 + threadIdx.x];
         output[workIndex + 1024] = embed_tokens[input_token * 2048 + threadIdx.x + 1024];
     }
 }
 
-void embeddingGatherDecode(int input_token, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens)
+void embeddingGatherDecode(int *gpu_last_tokens, int num_tokens, __nv_bfloat16 *output, __nv_bfloat16 *embed_tokens)
 {
     // even though embedding is 2048, I can only dispatch 1024 because it's max threads per block on my gpu
-    embeddingGatherKernelDecode<<<1, 1024>>>(input_token, output, embed_tokens);
+    embeddingGatherKernelDecode<<<num_tokens, 1024>>>(gpu_last_tokens, num_tokens, output, embed_tokens);
 #ifdef DEBUG
     cudaError error = cudaGetLastError();
     if (error != cudaError::cudaSuccess)

@@ -1262,18 +1262,20 @@ int main(int argc, char *argv[])
 
     cudaFree(attn_scores);
     cudaMalloc(&attn_scores, sizeof(__nv_bfloat16) * MAX_SEQ_LEN * NUM_Q_HEADS);
+
     // DECODE
     // since now I operate always on index 0 for all values and for current_position_token for new K and V
+    int *gpu_last_tokens;
+    cudaMalloc(&gpu_last_tokens, last_generated_tokens.size() * sizeof(int));
+    // TODO: move argmax to GPU and get rid of these CPU<->GPU tokens moves
 
-    int last_generated_token = max_token_idx;
-    generated_tokens.reserve(MAX_SEQ_LEN - input_tokens.size());
-    generated_tokens.push_back(last_generated_token);
-    int current_token_position = input_tokens.size();
-
-    while (last_generated_token != END_OF_TEXT_TOKEN_ID && last_generated_token != EOT_ID_TOKEN_ID && current_token_position < MAX_SEQ_LEN)
+    while (!std::all_of(is_prompt_finished.begin(), is_prompt_finished.end(), [](bool prompt)
+                        { return prompt; }))
+    // while (last_generated_token != END_OF_TEXT_TOKEN_ID && last_generated_token != EOT_ID_TOKEN_ID && current_token_position < MAX_SEQ_LEN)
     {
         // TODO: make it more suitable for single token operations, perhaps just pass a token id as param
-        embeddingGatherDecode(last_generated_token, hidden_state, weights.embed_tokens);
+        cudaMemcpy(gpu_last_tokens, last_generated_tokens.data(), last_generated_tokens.size() * sizeof(int), cudaMemcpyHostToDevice);
+        embeddingGatherDecode(gpu_last_tokens, last_generated_tokens.size(), hidden_state, weights.embed_tokens);
         for (int layer = 0; layer < N_LAYERS; ++layer)
         {
             rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], 1);
