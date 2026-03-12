@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
-set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc")
-set(CUDACXX "/usr/local/cuda/bin/nvcc")
+set(CMAKE_CUDA_COMPILER "/opt/cuda/bin/nvcc")
+set(CUDACXX "/opt/cuda/bin/nvcc")
 project(tiny-vllm LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)

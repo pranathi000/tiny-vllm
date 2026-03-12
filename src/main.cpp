@@ -1266,7 +1266,7 @@ int main(int argc, char *argv[])
     // DECODE
     // since now I operate always on index 0 for all values and for current_position_token for new K and V
     int *gpu_last_tokens;
-    cudaMalloc(&gpu_last_tokens, last_generated_tokens.size() * sizeof(int));
+    cudaMalloc(&gpu_last_tokens, num_prompts * sizeof(int));
     // TODO: move argmax to GPU and get rid of these CPU<->GPU tokens moves
 
     while (!std::all_of(is_prompt_finished.begin(), is_prompt_finished.end(), [](bool prompt)
@@ -1274,18 +1274,18 @@ int main(int argc, char *argv[])
     // while (last_generated_token != END_OF_TEXT_TOKEN_ID && last_generated_token != EOT_ID_TOKEN_ID && current_token_position < MAX_SEQ_LEN)
     {
         // TODO: make it more suitable for single token operations, perhaps just pass a token id as param
-        cudaMemcpy(gpu_last_tokens, last_generated_tokens.data(), last_generated_tokens.size() * sizeof(int), cudaMemcpyHostToDevice);
-        embeddingGatherDecode(gpu_last_tokens, last_generated_tokens.size(), hidden_state, weights.embed_tokens);
+        cudaMemcpy(gpu_last_tokens, last_generated_tokens.data(), num_prompts * sizeof(int), cudaMemcpyHostToDevice);
+        embeddingGatherDecode(gpu_last_tokens, num_prompts, hidden_state, weights.embed_tokens);
         for (int layer = 0; layer < N_LAYERS; ++layer)
         {
-            rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], 1);
+            rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], num_prompts);
             q_proj = buf_2048_1;
             // q proj (1, 2048)
             cublasGemmEx(cublas_handle,
                          CUBLAS_OP_T,
                          CUBLAS_OP_N,
                          EMBEDDING_LENGTH, // m
-                         1,                // n
+                         num_prompts,                // n
                          EMBEDDING_LENGTH, // k
                          &q_proj_alpha,
                          weights.w_q[layer], // A
@@ -1305,7 +1305,7 @@ int main(int argc, char *argv[])
                          CUBLAS_OP_T,
                          CUBLAS_OP_N,
                          KV_DIM,
-                         1,
+                         num_prompts,
                          EMBEDDING_LENGTH,
                          &k_proj_alpha,
                          weights.w_k[layer],
@@ -1315,7 +1315,7 @@ int main(int argc, char *argv[])
                          CUDA_R_16BF,
                          EMBEDDING_LENGTH,
                          &k_proj_beta,
-                         k_proj[layer] + current_token_position * KV_DIM,
+                         k_proj[layer] + current_token_position * KV_DIM, // TODO
                          CUDA_R_16BF,
                          KV_DIM,
                          CUBLAS_COMPUTE_32F,
@@ -1325,7 +1325,7 @@ int main(int argc, char *argv[])
                          CUBLAS_OP_T,
                          CUBLAS_OP_N,
                          KV_DIM,
-                         1,
+                         num_prompts,
                          EMBEDDING_LENGTH,
                          &v_proj_alpha,
                          weights.w_v[layer],
@@ -1385,7 +1385,7 @@ int main(int argc, char *argv[])
                              CUBLAS_OP_N,
                              CUBLAS_OP_N,
                              HEAD_DIM, // m
-                             1,        // n
+                             num_prompts,        // n
                              seq_len,  // k
                              &attn_scores_v_alpha,
                              v_head,
@@ -1408,7 +1408,7 @@ int main(int argc, char *argv[])
                          CUBLAS_OP_T,
                          CUBLAS_OP_N,
                          EMBEDDING_LENGTH, // m
-                         1,                // n
+                         num_prompts,                // n
                          EMBEDDING_LENGTH, // k
                          &o_proj_alpha,
                          weights.w_o[layer],
@@ -1433,7 +1433,7 @@ int main(int argc, char *argv[])
                          CUBLAS_OP_T,
                          CUBLAS_OP_N,
                          HIDDEN_DIM,       // m
-                         1,                // n
+                         num_prompts,                // n
                          EMBEDDING_LENGTH, // k
                          &gate_alpha,
                          weights.mlp_gate_proj[layer],
@@ -1454,7 +1454,7 @@ int main(int argc, char *argv[])
                          CUBLAS_OP_T,
                          CUBLAS_OP_N,
                          HIDDEN_DIM,       // m
-                         1,                // n
+                         num_prompts,                // n
                          EMBEDDING_LENGTH, // k
                          &up_alpha,
                          weights.mlp_up_proj[layer],
@@ -1470,14 +1470,14 @@ int main(int argc, char *argv[])
                          CUBLAS_COMPUTE_32F,
                          CUBLAS_GEMM_DEFAULT);
 
-            silu(gate, up, 1);
+            silu(gate, up, num_prompts);
 
             down = buf_2048_2;
             cublasGemmEx(cublas_handle,
                          CUBLAS_OP_T,
                          CUBLAS_OP_N,
                          EMBEDDING_LENGTH, // m
-                         1,                // n
+                         num_prompts,                // n
                          HIDDEN_DIM,       // k
                          &down_alpha,
                          weights.mlp_down_proj[layer],
@@ -1493,16 +1493,16 @@ int main(int argc, char *argv[])
                          CUBLAS_COMPUTE_32F,
                          CUBLAS_GEMM_DEFAULT);
 
-            residualAdd(hidden_state, down, 1);
+            residualAdd(hidden_state, down, num_prompts);
         }
 
-        rmsNorm(hidden_state, rms_norms, weights.norm, 1);
+        rmsNorm(hidden_state, rms_norms, weights.norm, num_prompts);
 
         cublasGemmEx(cublas_handle,
                      CUBLAS_OP_T,
                      CUBLAS_OP_N,
                      VOCAB_SIZE,       // m
-                     1,                // n
+                     num_prompts,                // n
                      EMBEDDING_LENGTH, // k
                      &embed_alpha,
                      weights.embed_tokens,
