@@ -741,7 +741,7 @@ int main(int argc, char *argv[])
     input_tokens_size = input_tokens.size();
     int max_input_len = 8;                                      // yes, I set it manualy for now. TODO automate it
     int num_prompts = 4;                                        // same
-    int max_buffer_size = std::max(max_input_len, num_prompts); // it will make sense once the aboves are not hardcoded
+    int max_buffer_size = std::max(max_input_len, num_prompts); // it will make more sense once the aboves are not hardcoded
 
 #ifdef DEBUG
     std::cout << "Input tokens:\n";
@@ -840,12 +840,12 @@ int main(int argc, char *argv[])
     float down_beta = 0.0f;
 
     __nv_bfloat16 *embed_proj;
-    cudaMalloc(&embed_proj, sizeof(__nv_bfloat16) * max_input_len * VOCAB_SIZE);
+    cudaMalloc(&embed_proj, sizeof(__nv_bfloat16) * max_buffer_size * VOCAB_SIZE);
     float embed_alpha = 1.0f;
     float embed_beta = 0.0f;
 
     std::vector<__nv_bfloat16> embed_proj_cpu;
-    embed_proj_cpu.resize(max_input_len * VOCAB_SIZE);
+    embed_proj_cpu.resize(max_buffer_size * VOCAB_SIZE);
 
     std::vector<std::vector<int>> generated_tokens(num_prompts);
     std::vector<int> last_generated_tokens(num_prompts);
@@ -1275,7 +1275,6 @@ int main(int argc, char *argv[])
 
     while (!std::all_of(is_prompt_finished.begin(), is_prompt_finished.end(), [](bool prompt)
                         { return prompt; }))
-    // while (last_generated_token != END_OF_TEXT_TOKEN_ID && last_generated_token != EOT_ID_TOKEN_ID && current_token_position < MAX_SEQ_LEN)
     {
         // TODO: make it more suitable for single token operations, perhaps just pass a token id as param
         cudaMemcpy(gpu_last_tokens, last_generated_tokens.data(), num_prompts * sizeof(int), cudaMemcpyHostToDevice);
@@ -1374,66 +1373,73 @@ int main(int argc, char *argv[])
                 cudaMemcpy(v_proj[row][layer] + current_prompt_len[row] * KV_DIM, kv_proj_batched_buffer + row * KV_DIM, sizeof(__nv_bfloat16) * KV_DIM, cudaMemcpyDeviceToDevice);
             }
 
-            ropeDecode(q_proj, current_token_position, EMBEDDING_LENGTH);
-            ropeDecode(k_proj[layer] + current_token_position * KV_DIM, current_token_position, KV_DIM);
-
-            int seq_len = current_token_position + 1;
-            for (int i = 0; i < NUM_Q_HEADS; ++i)
+            for (int row = 0; row < num_prompts; ++row)
             {
-                int k_head_idx = i / GQA_Q_TO_K_RATIO;
-                __nv_bfloat16 *q_head = q_proj + i * HEAD_DIM;                 // (1, 64)
-                __nv_bfloat16 *k_head = k_proj[layer] + k_head_idx * HEAD_DIM; // (current_token_position+1, 64)
-                __nv_bfloat16 *attn_score_head = attn_scores + MAX_SEQ_LEN * i;
-
-                cublasGemmEx(cublas_handle,
-                             CUBLAS_OP_T,
-                             CUBLAS_OP_N,
-                             seq_len,  // m
-                             1,        // n
-                             HEAD_DIM, // k
-                             &attn_alpha,
-                             k_head,
-                             CUDA_R_16BF,
-                             KV_DIM, // lda
-                             q_head,
-                             CUDA_R_16BF,
-                             EMBEDDING_LENGTH, // ldb
-                             &attn_beta,
-                             attn_score_head,
-                             CUDA_R_16BF,
-                             MAX_SEQ_LEN, // ldc
-                             CUBLAS_COMPUTE_32F,
-                             CUBLAS_GEMM_DEFAULT);
+                ropeDecode(&q_proj[row * EMBEDDING_LENGTH], current_prompt_len[row], EMBEDDING_LENGTH);
+                ropeDecode(k_proj[row][layer] + current_prompt_len[row] * KV_DIM, current_prompt_len[row], KV_DIM);
             }
-            softmaxDecode(attn_scores, seq_len);
 
-            attn_scores_v = buf_2048_1;
-            for (int i = 0; i < NUM_Q_HEADS; ++i)
+            for (int row = 0; row < num_prompts; ++row)
             {
-                int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
-                __nv_bfloat16 *attn_scores_head = attn_scores + i * MAX_SEQ_LEN;
-                __nv_bfloat16 *v_head = v_proj[layer] + v_head_idx * HEAD_DIM;
-                __nv_bfloat16 *output_attn_scores_head = attn_scores_v + i * HEAD_DIM;
+                int seq_len = current_prompt_len[row] + 1;
+                for (int i = 0; i < NUM_Q_HEADS; ++i)
+                {
+                    int k_head_idx = i / GQA_Q_TO_K_RATIO;
+                    __nv_bfloat16 *q_head = q_proj + row * EMBEDDING_LENGTH + i * HEAD_DIM;
+                    __nv_bfloat16 *k_head = k_proj[row][layer] + k_head_idx * HEAD_DIM;
+                    __nv_bfloat16 *attn_score_head = attn_scores + MAX_SEQ_LEN * i;
 
-                cublasGemmEx(cublas_handle,
-                             CUBLAS_OP_N,
-                             CUBLAS_OP_N,
-                             HEAD_DIM,    // m
-                             num_prompts, // n
-                             seq_len,     // k
-                             &attn_scores_v_alpha,
-                             v_head,
-                             CUDA_R_16BF,
-                             KV_DIM, // lda
-                             attn_scores_head,
-                             CUDA_R_16BF,
-                             MAX_SEQ_LEN, // ldb
-                             &attn_scores_v_beta,
-                             output_attn_scores_head,
-                             CUDA_R_16BF,
-                             EMBEDDING_LENGTH, // ldc
-                             CUBLAS_COMPUTE_32F,
-                             CUBLAS_GEMM_DEFAULT);
+                    cublasGemmEx(cublas_handle,
+                                 CUBLAS_OP_T,
+                                 CUBLAS_OP_N,
+                                 seq_len,  // m
+                                 1,        // n
+                                 HEAD_DIM, // k
+                                 &attn_alpha,
+                                 k_head,
+                                 CUDA_R_16BF,
+                                 KV_DIM, // lda
+                                 q_head,
+                                 CUDA_R_16BF,
+                                 EMBEDDING_LENGTH, // ldb
+                                 &attn_beta,
+                                 attn_score_head,
+                                 CUDA_R_16BF,
+                                 MAX_SEQ_LEN, // ldc
+                                 CUBLAS_COMPUTE_32F,
+                                 CUBLAS_GEMM_DEFAULT);
+                }
+
+                softmaxDecode(attn_scores, seq_len);
+
+                attn_scores_v = buf_2048_1;
+                for (int i = 0; i < NUM_Q_HEADS; ++i)
+                {
+                    int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
+                    __nv_bfloat16 *attn_scores_head = attn_scores + i * MAX_SEQ_LEN;
+                    __nv_bfloat16 *v_head = v_proj[row][layer] + v_head_idx * HEAD_DIM;
+                    __nv_bfloat16 *output_attn_scores_head = attn_scores_v + row * EMBEDDING_LENGTH + i * HEAD_DIM;
+
+                    cublasGemmEx(cublas_handle,
+                                 CUBLAS_OP_N,
+                                 CUBLAS_OP_N,
+                                 HEAD_DIM, // m
+                                 1,        // n
+                                 seq_len,  // k
+                                 &attn_scores_v_alpha,
+                                 v_head,
+                                 CUDA_R_16BF,
+                                 KV_DIM, // lda
+                                 attn_scores_head,
+                                 CUDA_R_16BF,
+                                 MAX_SEQ_LEN, // ldb
+                                 &attn_scores_v_beta,
+                                 output_attn_scores_head,
+                                 CUDA_R_16BF,
+                                 EMBEDDING_LENGTH, // ldc
+                                 CUBLAS_COMPUTE_32F,
+                                 CUBLAS_GEMM_DEFAULT);
+                }
             }
 
             o_proj = buf_2048_2;
@@ -1458,11 +1464,11 @@ int main(int argc, char *argv[])
                          CUBLAS_COMPUTE_32F,
                          CUBLAS_GEMM_DEFAULT);
 
-            residualAdd(hidden_state, o_proj, 1);
+            residualAdd(hidden_state, o_proj, num_prompts);
 
-            rmsNorm(hidden_state, rms_norms, weights.post_attn_layernorms[layer], 1);
+            rmsNorm(hidden_state, rms_norms, weights.post_attn_layernorms[layer], num_prompts);
 
-            // (1, 2048) * (2048, 8192) -> (1, 8192)
+            // MLP
             cublasGemmEx(cublas_handle,
                          CUBLAS_OP_T,
                          CUBLAS_OP_N,
@@ -1552,22 +1558,41 @@ int main(int argc, char *argv[])
                      CUBLAS_COMPUTE_32F,
                      CUBLAS_GEMM_DEFAULT);
 
-        cudaMemcpy(embed_proj_cpu.data(), embed_proj, sizeof(__nv_bfloat16) * VOCAB_SIZE, cudaMemcpyDeviceToHost);
-        max_token = (float)embed_proj_cpu[0];
-        max_token_idx = 0;
-        for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
+        cudaMemcpy(embed_proj_cpu.data(), embed_proj, sizeof(__nv_bfloat16) * num_prompts * VOCAB_SIZE, cudaMemcpyDeviceToHost);
+
+        float max_token = 0.0;
+        int max_token_idx = 0;
+        for (int row = 0; row < num_prompts; ++row)
         {
-            if ((float)embed_proj_cpu[token_idx] > max_token)
+            if (is_prompt_finished[row])
             {
-                max_token = embed_proj_cpu[token_idx];
-                max_token_idx = token_idx;
+                // we discard the batch item here, so much wasted computation!
+                // but now this is how I really can feel the way why continouous batching was invented <3 to mitigate exactly this problem
+                continue;
+            }
+            max_token = (float)embed_proj_cpu[row * VOCAB_SIZE]; // TODO: verify if float is good enough in place of nvbf16
+            max_token_idx = 0;
+            for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
+            {
+                if ((float)embed_proj_cpu[row * VOCAB_SIZE + token_idx] > max_token)
+                {
+                    max_token = embed_proj_cpu[row * VOCAB_SIZE + token_idx];
+                    max_token_idx = token_idx;
+                }
+            }
+            // TODO: wrap with #ifdef DEBUG
+            std::cout << "Output token: " << (float)max_token << ", token index: " << std::to_string(max_token_idx) << std::endl;
+            if (max_token_idx == END_OF_TEXT_TOKEN_ID || max_token_idx == EOT_ID_TOKEN_ID || current_prompt_len[row] == MAX_SEQ_LEN - 1)
+            {
+                is_prompt_finished[row] = true;
+            }
+            else
+            {
+                last_generated_tokens[row] = max_token_idx;
+                generated_tokens[row].push_back(max_token_idx);
+                current_prompt_len[row] = current_prompt_len[row] + 1;
             }
         }
-        std::cout << "Output token: " << (float)max_token << ", token index: " << std::to_string(max_token_idx) << std::endl;
-
-        last_generated_token = max_token_idx;
-        generated_tokens.push_back(last_generated_token);
-        current_token_position += 1;
     }
     std::cout << "\nOk bye!\n";
     cublasDestroy(cublas_handle);
