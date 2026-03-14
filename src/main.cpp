@@ -156,47 +156,35 @@ int main(int argc, char *argv[])
     queue.push({128000, 128006, 882, 128007, 271, 64693, 315, 9822, 30, 128009, 128006, 78191, 128007, 271});
 
     // BATCH
-    std::vector<bool> slots_availability(BATCH_SIZE, true); // set to false when slot taken, set to true when free
-    std::vector<int> input_tokens();                        // all tokens from all batch items concatenated; NOW IT REPRESENTS CURRENT BATCH, NOT ALL TOKENS
+    std::vector<bool> is_slot_free(BATCH_SIZE, true); // set to false when slot taken, set to true when free
+    std::vector<int> input_tokens;                    // all tokens from all batch items concatenated; NOW IT REPRESENTS CURRENT BATCH, NOT ALL TOKENS
     int input_tokens_size;
 
-    std::vector<int> prompt_offsets; // indicate where the next prompt starts - same size as prompt_lengths, they have to match by index
-    // TODO: recalculate prompt_offsets, input_tokens_size and prompt_lengths always when there is a change to input_tokens
-    std::vector<int> prompt_lengths; // indicates length of each prompt
+    std::vector<std::vector<int>> generated_tokens(BATCH_SIZE);
+    std::vector<int> last_generated_tokens(BATCH_SIZE);
+    std::vector<int> current_prompt_len(BATCH_SIZE, 0);
+
+    // TODO: recalculate input_tokens_size and prompt_lengths always when there is a change to input_tokens
     // TODO: right now I handle input manually, it's the least interesting part, will come back to it when continuous batching and pagedattn works
 
-    std::vector<int> queue_front;
+    std::vector<int> prompt;
 
-    for (int slot = 0; slot < slots_availability.size(); ++i)
+    for (int slot = 0; slot < is_slot_free.size() && !queue.empty(); ++slot)
     {
-        if (!slots_availability[slot])
+        if (!is_slot_free[slot])
         {
             continue; // slot taken, skip
         }
-        if (queue.size() > 0)
-        {
-            queue_front = queue.front();
-            auto slot_position_in_batch = input_tokens[slot * EMBEDDING_LENGTH];
-            for (int j = 0; j < queue_front.size(); j++)
-            {
-                input_tokens.push_back(queue_front[j]); // TODO: inefficient
-            }
-            queue.pop();
-            slots_availability[slot] = false;
-        }
+        prompt = queue.front();
+        queue.pop();
+        is_slot_free[slot] = false;
+
+        // TODO: prefill here, ending up with firs output token
+        int first_token = -1; // TODO just a stub
+        last_generated_tokens[slot] = first_token;
+        current_prompt_len[slot] = prompt.size();
+        generated_tokens[slot].push_back(first_token);
     }
-
-    prompt_offsets.push_back(0);
-    prompt_lengths.push_back(17);
-
-    prompt_offsets.push_back(17);
-    prompt_lengths.push_back(14);
-
-    prompt_offsets.push_back(31);
-    prompt_lengths.push_back(13);
-
-    prompt_offsets.push_back(44);
-    prompt_lengths.push_back(14);
 
     input_tokens_size = input_tokens.size();
     int max_input_len = 17;                                     // yes, I set it manualy for now. TODO automate it
@@ -288,11 +276,6 @@ int main(int argc, char *argv[])
 
     std::vector<__nv_bfloat16> embed_proj_cpu;
     embed_proj_cpu.resize(max_buffer_size * VOCAB_SIZE);
-
-    std::vector<std::vector<int>> generated_tokens(num_prompts);
-    std::vector<int> last_generated_tokens(num_prompts);
-    std::vector<int> current_prompt_len(num_prompts);
-    std::vector<bool> is_prompt_finished(num_prompts, false); // all of these values identified by the same id
 
     // PREFILL
     for (int prompt_id = 0; prompt_id < num_prompts; ++prompt_id)
