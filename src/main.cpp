@@ -27,6 +27,8 @@ constexpr int END_OF_TEXT_TOKEN_ID = 128001; // <|end_of_text|>
 constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>
 constexpr int MAX_SEQ_LEN = 2048;            // TODO: make it tunable
 constexpr int BATCH_SIZE = 2;                // TODO: not even close to being good
+constexpr int MAX_PROMPT_LEN = 512;          // TODO: arbitrary, tunable
+constexpr int MAX_BUFFER_SIZE = std::max(MAX_PROMPT_LEN, BATCH_SIZE);
 
 int checkGPUStatus()
 {
@@ -136,6 +138,14 @@ int loadWeights(Weights &weights)
 
 int main(int argc, char *argv[])
 {
+    cublasHandle_t cublas_handle;
+    cublasStatus_t status = cublasCreate(&cublas_handle);
+    if (status != CUBLAS_STATUS_SUCCESS)
+    {
+        std::cerr << "cuBLAS init failed, status: " << status << "\n";
+        return 1;
+    }
+
     Weights weights{};
     if (loadWeights(weights) != 0)
     {
@@ -157,69 +167,29 @@ int main(int argc, char *argv[])
 
     // BATCH
     std::vector<bool> is_slot_free(BATCH_SIZE, true); // set to false when slot taken, set to true when free
-    std::vector<int> input_tokens;                    // all tokens from all batch items concatenated; NOW IT REPRESENTS CURRENT BATCH, NOT ALL TOKENS
-    int input_tokens_size;
 
     std::vector<std::vector<int>> generated_tokens(BATCH_SIZE);
     std::vector<int> last_generated_tokens(BATCH_SIZE);
     std::vector<int> current_prompt_len(BATCH_SIZE, 0);
 
-    // TODO: recalculate input_tokens_size and prompt_lengths always when there is a change to input_tokens
+    // TODO: recalculate input_tokens_size and prompt_lengths always when there is a change to prompt_under_prefill
     // TODO: right now I handle input manually, it's the least interesting part, will come back to it when continuous batching and pagedattn works
 
     std::vector<int> prompt;
-
-    for (int slot = 0; slot < is_slot_free.size() && !queue.empty(); ++slot)
-    {
-        if (!is_slot_free[slot])
-        {
-            continue; // slot taken, skip
-        }
-        prompt = queue.front();
-        queue.pop();
-        is_slot_free[slot] = false;
-
-        // TODO: prefill here, ending up with firs output token
-        int first_token = -1; // TODO just a stub
-        last_generated_tokens[slot] = first_token;
-        current_prompt_len[slot] = prompt.size();
-        generated_tokens[slot].push_back(first_token);
-    }
-
-    input_tokens_size = input_tokens.size();
-    int max_input_len = 17;                                     // yes, I set it manualy for now. TODO automate it
-    int num_prompts = 4;                                        // same
-    int max_buffer_size = std::max(max_input_len, num_prompts); // it will make more sense once the aboves are not hardcoded
-
+    int prompt_len;
     int *gpu_input_tokens;
-    cudaMalloc(&gpu_input_tokens, input_tokens_size * sizeof(int));
-    cudaMemcpy(gpu_input_tokens, input_tokens.data(), input_tokens_size * sizeof(int), cudaMemcpyHostToDevice);
-
-    // INFERENCE STARTS HERE! =]
-    // I have the same amount of embeddings as input tokens
-    // it's just every embedding is EMBEDDING_LENGTH length bf16 vector
-    // retrieved from model weights based on token's value
-
+    cudaMalloc(&gpu_input_tokens, MAX_PROMPT_LEN * sizeof(int));
     __nv_bfloat16 *input_embeddings;
-    cudaMalloc(&input_embeddings, input_tokens_size * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
-    embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, input_tokens.size());
-
-    cublasHandle_t cublas_handle;
-    cublasStatus_t status = cublasCreate(&cublas_handle);
-    if (status != CUBLAS_STATUS_SUCCESS)
-    {
-        std::cerr << "cuBLAS init failed, status: " << status << "\n";
-        return 1;
-    }
+    cudaMalloc(&input_embeddings, MAX_PROMPT_LEN * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
 
     __nv_bfloat16 *hidden_state;
-    cudaMalloc(&hidden_state, max_buffer_size * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    cudaMalloc(&hidden_state, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
 
     __nv_bfloat16 *rms_norms;
-    cudaMalloc(&rms_norms, max_buffer_size * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    cudaMalloc(&rms_norms, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
 
     __nv_bfloat16 *buf_2048_1; // shared between q_proj and attn_scores_v
-    cudaMalloc(&buf_2048_1, max_buffer_size * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    cudaMalloc(&buf_2048_1, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     __nv_bfloat16 *q_proj;
     float q_proj_alpha = 1.0f;
     float q_proj_beta = 0.0f;
@@ -240,28 +210,31 @@ int main(int argc, char *argv[])
     float v_proj_alpha = 1.0f;
     float v_proj_beta = 0.0f;
 
-    __nv_bfloat16 *attn_scores;
-    cudaMalloc(&attn_scores, max_input_len * max_input_len * sizeof(__nv_bfloat16) * NUM_Q_HEADS);
+    __nv_bfloat16 *prefill_attn_scores;
+    cudaMalloc(&prefill_attn_scores, MAX_PROMPT_LEN * MAX_PROMPT_LEN * sizeof(__nv_bfloat16) * NUM_Q_HEADS);
     float attn_alpha = 1.0f / 8.0f;
     float attn_beta = 0.0f;
+
+    __nv_bfloat16 *decode_attn_scores;
+    cudaMalloc(&decode_attn_scores, sizeof(__nv_bfloat16) * MAX_SEQ_LEN * NUM_Q_HEADS);
 
     __nv_bfloat16 *attn_scores_v;
     float attn_scores_v_alpha = 1.0f;
     float attn_scores_v_beta = 0.0f;
 
     __nv_bfloat16 *buf_2048_2; // shared between o_proj and down
-    cudaMalloc(&buf_2048_2, max_buffer_size * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
+    cudaMalloc(&buf_2048_2, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * EMBEDDING_LENGTH);
     __nv_bfloat16 *o_proj;
     float o_proj_alpha = 1.0f;
     float o_proj_beta = 0.0f;
 
     __nv_bfloat16 *gate;
-    cudaMalloc(&gate, max_buffer_size * sizeof(__nv_bfloat16) * HIDDEN_DIM);
+    cudaMalloc(&gate, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * HIDDEN_DIM);
     float gate_alpha = 1.0f;
     float gate_beta = 0.0f;
 
     __nv_bfloat16 *up;
-    cudaMalloc(&up, max_buffer_size * sizeof(__nv_bfloat16) * HIDDEN_DIM);
+    cudaMalloc(&up, MAX_BUFFER_SIZE * sizeof(__nv_bfloat16) * HIDDEN_DIM);
     float up_alpha = 1.0f;
     float up_beta = 0.0f;
 
@@ -270,24 +243,44 @@ int main(int argc, char *argv[])
     float down_beta = 0.0f;
 
     __nv_bfloat16 *embed_proj;
-    cudaMalloc(&embed_proj, sizeof(__nv_bfloat16) * max_buffer_size * VOCAB_SIZE);
+    cudaMalloc(&embed_proj, sizeof(__nv_bfloat16) * MAX_BUFFER_SIZE * VOCAB_SIZE);
     float embed_alpha = 1.0f;
     float embed_beta = 0.0f;
 
     std::vector<__nv_bfloat16> embed_proj_cpu;
-    embed_proj_cpu.resize(max_buffer_size * VOCAB_SIZE);
+    embed_proj_cpu.resize(MAX_BUFFER_SIZE * VOCAB_SIZE);
+    // decode-only allocation
+    int *gpu_last_tokens;
+    cudaMalloc(&gpu_last_tokens, BATCH_SIZE * sizeof(int));
+    // TODO: move argmax to GPU and get rid of these CPU<->GPU tokens moves
 
-    // PREFILL
-    for (int prompt_id = 0; prompt_id < num_prompts; ++prompt_id)
+    // reused temporary buffer for batched K/V cache computation
+    __nv_bfloat16 *kv_proj_batched_buffer;
+    cudaMalloc(&kv_proj_batched_buffer, BATCH_SIZE * sizeof(__nv_bfloat16) * KV_DIM);
+
+    for (int slot = 0; slot < is_slot_free.size() && !queue.empty(); ++slot)
     {
+        if (!is_slot_free[slot])
+        {
+            continue; // slot taken, skip
+        }
+        prompt = queue.front();
+        prompt_len = prompt.size();
+        queue.pop();
+        is_slot_free[slot] = false;
+
+        // TODO: prefill here, ending up with firs output token
+        cudaMemcpy(gpu_input_tokens, prompt.data(), prompt_len * sizeof(int), cudaMemcpyHostToDevice);
+        embeddingGather(gpu_input_tokens, input_embeddings, weights.embed_tokens, prompt_len);
+
         cudaMemcpy(hidden_state,
-                   input_embeddings + prompt_offsets[prompt_id] * EMBEDDING_LENGTH,
-                   prompt_lengths[prompt_id] * EMBEDDING_LENGTH * sizeof(__nv_bfloat16),
+                   input_embeddings,
+                   prompt_len * EMBEDDING_LENGTH * sizeof(__nv_bfloat16),
                    cudaMemcpyDeviceToDevice);
         for (int layer = 0; layer < N_LAYERS; ++layer)
         {
 
-            rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], prompt_lengths[prompt_id]);
+            rmsNorm(hidden_state, rms_norms, weights.input_layernorm[layer], prompt_len);
 
             // Q = inputs * wq^T; my matrices are row-major, cublas expects column-major
             // it perceives my matrices as transposed
@@ -303,7 +296,7 @@ int main(int argc, char *argv[])
                                                         CUBLAS_OP_T,
                                                         CUBLAS_OP_N,
                                                         EMBEDDING_LENGTH,
-                                                        prompt_lengths[prompt_id],
+                                                        prompt_len,
                                                         EMBEDDING_LENGTH,
                                                         &q_proj_alpha,
                                                         weights.w_q[layer],
@@ -326,7 +319,7 @@ int main(int argc, char *argv[])
                                                         CUBLAS_OP_T,
                                                         CUBLAS_OP_N,
                                                         KV_DIM,
-                                                        prompt_lengths[prompt_id],
+                                                        prompt_len,
                                                         EMBEDDING_LENGTH,
                                                         &k_proj_alpha,
                                                         weights.w_k[layer],
@@ -336,7 +329,7 @@ int main(int argc, char *argv[])
                                                         CUDA_R_16BF,
                                                         EMBEDDING_LENGTH,
                                                         &k_proj_beta,
-                                                        k_proj[prompt_id][layer],
+                                                        k_proj[slot][layer],
                                                         CUDA_R_16BF,
                                                         KV_DIM,
                                                         CUBLAS_COMPUTE_32F,
@@ -347,7 +340,7 @@ int main(int argc, char *argv[])
                                                         CUBLAS_OP_T,
                                                         CUBLAS_OP_N,
                                                         KV_DIM,
-                                                        prompt_lengths[prompt_id],
+                                                        prompt_len,
                                                         EMBEDDING_LENGTH,
                                                         &v_proj_alpha,
                                                         weights.w_v[layer],
@@ -357,7 +350,7 @@ int main(int argc, char *argv[])
                                                         CUDA_R_16BF,
                                                         EMBEDDING_LENGTH,
                                                         &v_proj_beta,
-                                                        v_proj[prompt_id][layer],
+                                                        v_proj[slot][layer],
                                                         CUDA_R_16BF,
                                                         KV_DIM,
                                                         CUBLAS_COMPUTE_32F,
@@ -365,8 +358,8 @@ int main(int argc, char *argv[])
 
             // RoPE now
 
-            rope(q_proj, prompt_lengths[prompt_id], EMBEDDING_LENGTH);
-            rope(k_proj[prompt_id][layer], prompt_lengths[prompt_id], KV_DIM);
+            rope(q_proj, prompt_len, EMBEDDING_LENGTH);
+            rope(k_proj[slot][layer], prompt_len, KV_DIM);
 
             // attention scores
             // per head, 64 elements each
@@ -383,14 +376,14 @@ int main(int argc, char *argv[])
             {
                 int k_head_idx = i / GQA_Q_TO_K_RATIO;
                 __nv_bfloat16 *q_head = q_proj + i * HEAD_DIM;
-                __nv_bfloat16 *k_head = k_proj[prompt_id][layer] + k_head_idx * HEAD_DIM;
-                __nv_bfloat16 *attn_score_head = attn_scores + prompt_lengths[prompt_id] * prompt_lengths[prompt_id] * i;
+                __nv_bfloat16 *k_head = k_proj[slot][layer] + k_head_idx * HEAD_DIM;
+                __nv_bfloat16 *attn_score_head = prefill_attn_scores + prompt_len * prompt_len * i;
 
                 cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
                                                                 CUBLAS_OP_T,
                                                                 CUBLAS_OP_N,
-                                                                prompt_lengths[prompt_id],
-                                                                prompt_lengths[prompt_id],
+                                                                prompt_len,
+                                                                prompt_len,
                                                                 HEAD_DIM,
                                                                 &attn_alpha,
                                                                 k_head,
@@ -402,14 +395,14 @@ int main(int argc, char *argv[])
                                                                 &attn_beta,
                                                                 attn_score_head,
                                                                 CUDA_R_16BF,
-                                                                prompt_lengths[prompt_id],
+                                                                prompt_len,
                                                                 CUBLAS_COMPUTE_32F,
                                                                 CUBLAS_GEMM_DEFAULT);
             }
 
-            causalMask(attn_scores, prompt_lengths[prompt_id]);
+            causalMask(prefill_attn_scores, prompt_len);
 
-            softmax(attn_scores, prompt_lengths[prompt_id]);
+            softmax(prefill_attn_scores, prompt_len);
 
             // attn scores * V
             // (32, num_tok, num_tok) * (num_tok, 512)
@@ -425,24 +418,24 @@ int main(int argc, char *argv[])
             for (int i = 0; i < NUM_Q_HEADS; ++i)
             {
                 int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
-                // i * input_tokens.size() * input_tokens.size(),  because attn scores is (32, num_tok, num_tok)
-                __nv_bfloat16 *attn_scores_head = attn_scores + i * prompt_lengths[prompt_id] * prompt_lengths[prompt_id];
-                __nv_bfloat16 *v_head = v_proj[prompt_id][layer] + v_head_idx * HEAD_DIM;
+                // i * prompt_under_prefill.size() * prompt_under_prefill.size(),  because attn scores is (32, num_tok, num_tok)
+                __nv_bfloat16 *attn_scores_head = prefill_attn_scores + i * prompt_len * prompt_len;
+                __nv_bfloat16 *v_head = v_proj[slot][layer] + v_head_idx * HEAD_DIM;
                 __nv_bfloat16 *output_attn_scores_head = attn_scores_v + i * HEAD_DIM;
 
                 cublasStatus_t attn_score_status = cublasGemmEx(cublas_handle,
                                                                 CUBLAS_OP_N,
                                                                 CUBLAS_OP_N,
                                                                 HEAD_DIM,
-                                                                prompt_lengths[prompt_id],
-                                                                prompt_lengths[prompt_id],
+                                                                prompt_len,
+                                                                prompt_len,
                                                                 &attn_scores_v_alpha,
                                                                 v_head,
                                                                 CUDA_R_16BF,
                                                                 KV_DIM,
                                                                 attn_scores_head,
                                                                 CUDA_R_16BF,
-                                                                prompt_lengths[prompt_id],
+                                                                prompt_len,
                                                                 &attn_scores_v_beta,
                                                                 output_attn_scores_head,
                                                                 CUDA_R_16BF,
@@ -460,7 +453,7 @@ int main(int argc, char *argv[])
                                                         CUBLAS_OP_T,
                                                         CUBLAS_OP_N,
                                                         EMBEDDING_LENGTH,
-                                                        prompt_lengths[prompt_id],
+                                                        prompt_len,
                                                         EMBEDDING_LENGTH,
                                                         &o_proj_alpha,
                                                         weights.w_o[layer],
@@ -477,9 +470,9 @@ int main(int argc, char *argv[])
                                                         CUBLAS_GEMM_DEFAULT);
 
             // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
-            residualAdd(hidden_state, o_proj, prompt_lengths[prompt_id]);
+            residualAdd(hidden_state, o_proj, prompt_len);
             // post attention RMS Norm
-            rmsNorm(hidden_state, rms_norms, weights.post_attn_layernorms[layer], prompt_lengths[prompt_id]);
+            rmsNorm(hidden_state, rms_norms, weights.post_attn_layernorms[layer], prompt_len);
 
             // SwiGLU time - just MLP + SiLU
             // gate = hidden_state (rms-normed) * mlp_gate_proj ^ T
@@ -496,7 +489,7 @@ int main(int argc, char *argv[])
                                                       CUBLAS_OP_T,
                                                       CUBLAS_OP_N,
                                                       HIDDEN_DIM,
-                                                      prompt_lengths[prompt_id],
+                                                      prompt_len,
                                                       EMBEDDING_LENGTH,
                                                       &gate_alpha,
                                                       weights.mlp_gate_proj[layer],
@@ -517,7 +510,7 @@ int main(int argc, char *argv[])
                                                     CUBLAS_OP_T,
                                                     CUBLAS_OP_N,
                                                     HIDDEN_DIM,
-                                                    prompt_lengths[prompt_id],
+                                                    prompt_len,
                                                     EMBEDDING_LENGTH,
                                                     &up_alpha,
                                                     weights.mlp_up_proj[layer],
@@ -537,7 +530,7 @@ int main(int argc, char *argv[])
             // after_silu = SiLU(gate) * up (element-wise multication)
             // after_silu = gate * (1 / (1 + e^(-gate))) * up
             // gate is dim (num_tok, 8192), up too
-            silu(gate, up, prompt_lengths[prompt_id]); // gate = after_silu now
+            silu(gate, up, prompt_len); // gate = after_silu now
 
             // down projection
             // output = post-silu * down_proj^T
@@ -553,7 +546,7 @@ int main(int argc, char *argv[])
                                                       CUBLAS_OP_T,
                                                       CUBLAS_OP_N,
                                                       EMBEDDING_LENGTH,
-                                                      prompt_lengths[prompt_id],
+                                                      prompt_len,
                                                       HIDDEN_DIM,
                                                       &down_alpha,
                                                       weights.mlp_down_proj[layer],
@@ -570,9 +563,9 @@ int main(int argc, char *argv[])
                                                       CUBLAS_GEMM_DEFAULT);
 
             // (num_tok, 2048) + (num_tok, 2048) -> (num_tok, 2048)
-            residualAdd(hidden_state, down, prompt_lengths[prompt_id]);
+            residualAdd(hidden_state, down, prompt_len);
         }
-        rmsNorm(hidden_state, rms_norms, weights.norm, prompt_lengths[prompt_id]);
+        rmsNorm(hidden_state, rms_norms, weights.norm, prompt_len);
 
         // logits = rms_norms * weights.embed_tokens^T
         // dim rms_norms: (num_tok, 2048), dim embed_tokens: (128256, 2048)
@@ -591,7 +584,7 @@ int main(int argc, char *argv[])
                                                    CUBLAS_OP_T,
                                                    CUBLAS_OP_N,
                                                    VOCAB_SIZE,
-                                                   prompt_lengths[prompt_id],
+                                                   prompt_len,
                                                    EMBEDDING_LENGTH,
                                                    &embed_alpha,
                                                    weights.embed_tokens,
@@ -607,11 +600,11 @@ int main(int argc, char *argv[])
                                                    CUBLAS_COMPUTE_32F,
                                                    CUBLAS_GEMM_DEFAULT);
 
-        cudaMemcpy(embed_proj_cpu.data(), embed_proj, sizeof(__nv_bfloat16) * prompt_lengths[prompt_id] * VOCAB_SIZE, cudaMemcpyDeviceToHost);
+        cudaMemcpy(embed_proj_cpu.data(), embed_proj, sizeof(__nv_bfloat16) * prompt_len * VOCAB_SIZE, cudaMemcpyDeviceToHost);
         // argmax to get the output token
         // TODO: write a proper kernel for it
         // for now just a simple CPU function
-        int last_token_offset = (prompt_lengths[prompt_id] - 1) * VOCAB_SIZE;
+        int last_token_offset = (prompt_len - 1) * VOCAB_SIZE;
         float max_token = (float)embed_proj_cpu[last_token_offset];
         int max_token_idx = 0;
         for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
@@ -624,26 +617,28 @@ int main(int argc, char *argv[])
         }
         std::cout << "Output token: " << (float)max_token << ", token index: " << std::to_string(max_token_idx) << std::endl;
 
-        generated_tokens[prompt_id].push_back(max_token_idx);
-        last_generated_tokens[prompt_id] = max_token_idx;
-        current_prompt_len[prompt_id] = prompt_lengths[prompt_id];
+        generated_tokens[slot].push_back(max_token_idx);
+        last_generated_tokens[slot] = max_token_idx;
+        current_prompt_len[slot] = prompt_len;
+
+        // // after prefill:
+        // int first_token = -1; // TODO just a stub
+        // last_generated_tokens[slot] = first_token;
+        // current_prompt_len[slot] = prompt.size();
+        // generated_tokens[slot].push_back(first_token);
     }
 
-    cudaFree(attn_scores);
-    cudaMalloc(&attn_scores, sizeof(__nv_bfloat16) * MAX_SEQ_LEN * NUM_Q_HEADS);
+    // INFERENCE STARTS HERE! =]
+    // I have the same amount of embeddings as input tokens
+    // it's just every embedding is EMBEDDING_LENGTH length bf16 vector
+    // retrieved from model weights based on token's value
+
+    // PREFILL
 
     // DECODE
     // since now I operate always on index 0 for all values and for current_position_token for new K and V
-    int *gpu_last_tokens;
-    cudaMalloc(&gpu_last_tokens, num_prompts * sizeof(int));
-    // TODO: move argmax to GPU and get rid of these CPU<->GPU tokens moves
 
-    // reused temporary buffer for batched K/V cache computation
-    __nv_bfloat16 *kv_proj_batched_buffer;
-    cudaMalloc(&kv_proj_batched_buffer, num_prompts * sizeof(__nv_bfloat16) * KV_DIM);
-
-    while (!std::all_of(is_prompt_finished.begin(), is_prompt_finished.end(), [](bool prompt)
-                        { return prompt; }))
+    while (true) // exit condition irrelevant for now, since it's an inference server that's supposed to run foreveeer!!!
     {
         // TODO: make it more suitable for single token operations, perhaps just pass a token id as param
         cudaMemcpy(gpu_last_tokens, last_generated_tokens.data(), num_prompts * sizeof(int), cudaMemcpyHostToDevice);
