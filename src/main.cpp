@@ -260,7 +260,6 @@ void prefill(std::vector<int> &prompt, std::queue<std::vector<int>> &queue, int 
             // write its value to block_table on the same position we read from
             // compute address of this block table in kv_cache
             // write tokens to it
-            // synchronize state of block_table with block_table_gpu (probably? unsure if needed now?)
             int block_idx = token_idx / BLOCK_SIZE;
             int block = block_table[slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + block_idx];
             if (block == -1)
@@ -552,6 +551,10 @@ void prefill(std::vector<int> &prompt, std::queue<std::vector<int>> &queue, int 
     generated_tokens[slot].push_back(max_token_idx);
     last_generated_tokens[slot] = max_token_idx;
     current_prompt_len[slot] = prompt_len;
+
+    // synchronize state of block_table with block_table_gpu
+    // TODO: do it more clever and not copy full table unnecessarily
+    cudaMemcpy(block_table_gpu, block_table.data(), MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int), cudaMemcpyHostToDevice);
 }
 
 int main(int argc, char *argv[])
