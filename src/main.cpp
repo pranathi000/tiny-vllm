@@ -692,9 +692,12 @@ int main(int argc, char *argv[])
     cudaMalloc(&gpu_last_tokens, BATCH_SIZE * sizeof(int));
     // TODO: move argmax to GPU and get rid of these CPU<->GPU tokens moves
 
-    // reused temporary buffer for batched K/V cache computation
-    __nv_bfloat16 *kv_proj_batched_buffer;
-    cudaMalloc(&kv_proj_batched_buffer, BATCH_SIZE * sizeof(__nv_bfloat16) * KV_DIM);
+    // reused temporary buffers for K and V cache computation during decode
+    __nv_bfloat16 *k_proj_batched_buffer;
+    cudaMalloc(&k_proj_batched_buffer, BATCH_SIZE * sizeof(__nv_bfloat16) * KV_DIM);
+
+    __nv_bfloat16 *v_proj_batched_buffer;
+    cudaMalloc(&v_proj_batched_buffer, BATCH_SIZE * sizeof(__nv_bfloat16) * KV_DIM);
 
     for (int slot = 0; slot < is_slot_free.size() && !queue.empty(); ++slot)
     {
@@ -808,17 +811,11 @@ int main(int argc, char *argv[])
                          CUDA_R_16BF,
                          EMBEDDING_LENGTH, // ldb, same reason for rms_norms
                          &k_proj_beta,
-                         kv_proj_batched_buffer, // TODO C
+                         k_proj_batched_buffer, // TODO C
                          CUDA_R_16BF,
                          KV_DIM, // ldc = 512
                          CUBLAS_COMPUTE_32F,
                          CUBLAS_GEMM_DEFAULT);
-
-            for (int slot = 0; slot < num_active_slots; ++slot)
-            {
-                int active_slot = active_slots[slot];
-                cudaMemcpy(k_proj[active_slot][layer] + current_prompt_len[active_slot] * KV_DIM, kv_proj_batched_buffer + slot * KV_DIM, sizeof(__nv_bfloat16) * KV_DIM, cudaMemcpyDeviceToDevice);
-            }
 
             // same
             cublasGemmEx(cublas_handle,
@@ -835,7 +832,7 @@ int main(int argc, char *argv[])
                          CUDA_R_16BF,
                          EMBEDDING_LENGTH,
                          &v_proj_beta,
-                         kv_proj_batched_buffer,
+                         v_proj_batched_buffer,
                          CUDA_R_16BF,
                          KV_DIM,
                          CUBLAS_COMPUTE_32F,
@@ -844,14 +841,32 @@ int main(int argc, char *argv[])
             for (int slot = 0; slot < num_active_slots; ++slot)
             {
                 int active_slot = active_slots[slot];
-                cudaMemcpy(v_proj[active_slot][layer] + current_prompt_len[active_slot] * KV_DIM, kv_proj_batched_buffer + slot * KV_DIM, sizeof(__nv_bfloat16) * KV_DIM, cudaMemcpyDeviceToDevice);
+                ropeDecode(&q_proj[slot * EMBEDDING_LENGTH], current_prompt_len[active_slot], EMBEDDING_LENGTH);
+                ropeDecode(k_proj_batched_buffer + slot * KV_DIM, current_prompt_len[active_slot], KV_DIM);
             }
 
+            // PagedAttn - scatter k and v from a temp buffer, like in the prefill
             for (int slot = 0; slot < num_active_slots; ++slot)
             {
                 int active_slot = active_slots[slot];
-                ropeDecode(&q_proj[slot * EMBEDDING_LENGTH], current_prompt_len[active_slot], EMBEDDING_LENGTH);
-                ropeDecode(k_proj[active_slot][layer] + current_prompt_len[active_slot] * KV_DIM, current_prompt_len[active_slot], KV_DIM);
+                int seq_len = current_prompt_len[active_slot]; // + generated tokens?
+                int logical_block_idx = seq_len / BLOCK_SIZE;
+                int token_in_block_idx = seq_len % BLOCK_SIZE;
+                int block = block_table[active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + logical_block_idx];
+                if (token_in_block_idx == 0)
+                {
+                    int physical_block_idx = free_blocks.back();
+                    free_blocks.pop_back();
+                    block = physical_block_idx;
+                    block_table[active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + logical_block_idx] = block;
+                }
+                __nv_bfloat16 *k_cache_ptr = (__nv_bfloat16 *)((char *)kv_cache + block * BLOCK_BYTES + token_in_block_idx * KV_DIM * sizeof(__nv_bfloat16));
+                __nv_bfloat16 *k_proj_ptr = k_proj_batched_buffer + slot * KV_DIM;
+                cudaMemcpy(k_cache_ptr, k_proj_ptr, KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
+
+                __nv_bfloat16 *v_cache_ptr = (__nv_bfloat16 *)((char *)kv_cache + block * BLOCK_BYTES + BLOCK_SIZE * KV_DIM * sizeof(__nv_bfloat16) + token_in_block_idx + KV_DIM * sizeof(__nv_bfloat16));
+                __nv_bfloat16 *v_proj_ptr = v_proj_batched_buffer + slot * KV_DIM;
+                cudaMemcpy(v_cache_ptr, v_proj_ptr, KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
             }
 
             for (int slot = 0; slot < num_active_slots; ++slot)
