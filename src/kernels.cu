@@ -1,9 +1,11 @@
 #include "kernels.cuh"
 #include <iostream>
 
+// TODO perhaps share these between main.cpp and kernels.cu to not duplicate them?
 constexpr int HEAD_DIM = 64;
 constexpr int NUM_Q_HEADS = 32;
 constexpr int MAX_SEQ_LEN = 2048;
+constexpr int GQA_Q_TO_K_RATIO = 4;
 
 // prefill / shared
 
@@ -365,4 +367,18 @@ void softmaxDecode(__nv_bfloat16 *input, int seq_len)
         std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
     }
 #endif
+}
+
+__global__ void pagedAttentionKernel()
+{
+    int seq_id = blockIdx.x;
+    int q_head = blockIdx.y;
+    int thread_id = threadIdx.x;
+
+    int k_head_idx = q_head / GQA_Q_TO_K_RATIO;
+}
+
+void pagedAttention(int num_active_slots)
+{
+    pagedAttentionKernel<<<dim3(num_active_slots, NUM_Q_HEADS), HEAD_DIM>>>();
 }
