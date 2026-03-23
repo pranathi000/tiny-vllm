@@ -31,7 +31,7 @@ constexpr int MAX_SEQ_LEN = 2048;            // TODO: make it tunable
 constexpr int BATCH_SIZE = 2;                // TODO: not even close to being good
 constexpr int MAX_PROMPT_LEN = 512;          // TODO: arbitrary, tunable
 constexpr int MAX_BUFFER_SIZE = std::max(MAX_PROMPT_LEN, BATCH_SIZE);
-constexpr int BLOCK_SIZE = 16;                                               // TODO: tunable as well
+constexpr int BLOCK_SIZE = 16;                                               // TODO: tunable as well, defined the size of a single page in pagedattn
 constexpr int BLOCK_BYTES = BLOCK_SIZE * KV_DIM * sizeof(__nv_bfloat16) * 2; // * 2 because K and V
 constexpr size_t KV_CACHE_SIZE_BYTES = 2ULL * 1024 * 1024 * 1024;            // TODO: 2GB
 constexpr int MAX_BLOCKS_PER_SEQ = MAX_SEQ_LEN / BLOCK_SIZE;                 // 2048 / 16 = 128
@@ -603,6 +603,11 @@ int main(int argc, char *argv[])
     std::vector<int> active_slots;
     std::vector<int> active_tokens;
 
+    int *gpu_active_slots;
+    cudaMalloc(&gpu_active_slots, BATCH_SIZE * sizeof(int));
+    int *gpu_seq_lens;
+    cudaMalloc(&gpu_seq_lens, BATCH_SIZE * sizeof(int));
+
     // TODO: recalculate input_tokens_size and prompt_lengths always when there is a change to prompt_under_prefill
     // TODO: right now I handle input manually, it's the least interesting part, will come back to it when continuous batching and pagedattn works
 
@@ -752,7 +757,17 @@ int main(int argc, char *argv[])
             continue;
         }
 
+        // copy useful data to gpu
         cudaMemcpy(gpu_last_tokens, active_tokens.data(), num_active_slots * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(gpu_active_slots, active_slots.data(), num_active_slots * sizeof(int), cudaMemcpyHostToDevice);
+        std::vector<int> seq_lens(num_active_slots);
+        for (int slot = 0; slot < num_active_slots; ++slot)
+        {
+            int active_slot = active_slots[slot];
+            seq_lens[slot] = current_prompt_len[active_slot] + 1;
+        }
+        cudaMemcpy(gpu_seq_lens, seq_lens.data(), seq_lens.size() * sizeof(int), cudaMemcpyHostToDevice);
+
         embeddingGatherDecode(gpu_last_tokens, num_active_slots, hidden_state, weights.embed_tokens);
         for (int layer = 0; layer < N_LAYERS; ++layer)
         {
@@ -845,7 +860,7 @@ int main(int argc, char *argv[])
                 ropeDecode(k_proj_batched_buffer + slot * KV_DIM, current_prompt_len[active_slot], KV_DIM);
             }
 
-            // PagedAttn - scatter k and v from a temp buffer, like in the prefill
+            // PagedAttn scatter k and v from a temp buffer, like in the prefill
             for (int slot = 0; slot < num_active_slots; ++slot)
             {
                 int active_slot = active_slots[slot];

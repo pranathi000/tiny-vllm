@@ -378,7 +378,7 @@ __global__ void pagedAttentionKernel()
     int k_head_idx = q_head / GQA_Q_TO_K_RATIO;
 }
 
-void pagedAttention(int num_active_slots)
+void pagedAttention(int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16* kv_cache, int* block_table_gpu, )
 {
     pagedAttentionKernel<<<dim3(num_active_slots, NUM_Q_HEADS), HEAD_DIM>>>();
 }
