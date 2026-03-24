@@ -31,11 +31,12 @@ constexpr int MAX_SEQ_LEN = 2048;            // TODO: make it tunable
 constexpr int BATCH_SIZE = 2;                // TODO: not even close to being good
 constexpr int MAX_PROMPT_LEN = 512;          // TODO: arbitrary, tunable
 constexpr int MAX_BUFFER_SIZE = std::max(MAX_PROMPT_LEN, BATCH_SIZE);
-constexpr int BLOCK_SIZE = 16;                                               // TODO: tunable as well, defined the size of a single page in pagedattn
-constexpr int BLOCK_BYTES = BLOCK_SIZE * KV_DIM * sizeof(__nv_bfloat16) * 2; // * 2 because K and V
-constexpr size_t KV_CACHE_SIZE_BYTES = 2ULL * 1024 * 1024 * 1024;            // TODO: 2GB
-constexpr int MAX_BLOCKS_PER_SEQ = MAX_SEQ_LEN / BLOCK_SIZE;                 // 2048 / 16 = 128
-constexpr int NUM_BLOCKS = KV_CACHE_SIZE_BYTES / BLOCK_BYTES;                // 2*1024*1024*1024/(16*512*2*2) = 65536
+constexpr int BLOCK_SIZE = 16; // TODO: tunable as well, defined the size of a single page in pagedattn
+constexpr int V_OFFSET = BLOCK_SIZE * KV_DIM * sizeof(__nv_bfloat16);
+constexpr int BLOCK_BYTES = V_OFFSET * 2;                         // * 2 because K and V
+constexpr size_t KV_CACHE_SIZE_BYTES = 2ULL * 1024 * 1024 * 1024; // TODO: 2GB
+constexpr int MAX_BLOCKS_PER_SEQ = MAX_SEQ_LEN / BLOCK_SIZE;      // 2048 / 16 = 128
+constexpr int NUM_BLOCKS = KV_CACHE_SIZE_BYTES / BLOCK_BYTES;     // 2*1024*1024*1024/(16*512*2*2) = 65536
 constexpr int MAX_SEQUENCES = BATCH_SIZE;
 
 int checkGPUStatus()
@@ -284,7 +285,7 @@ void prefill(std::vector<int> &prompt, std::queue<std::vector<int>> &queue, int 
             cudaMemcpy(k_cache_ptr, k_proj_ptr, num_tokens_to_copy * KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
 
             // store V
-            __nv_bfloat16 *v_cache_ptr = (__nv_bfloat16 *)((char *)kv_cache + block * BLOCK_BYTES + BLOCK_SIZE * KV_DIM * sizeof(__nv_bfloat16));
+            __nv_bfloat16 *v_cache_ptr = (__nv_bfloat16 *)((char *)kv_cache + block * BLOCK_BYTES + V_OFFSET);
             __nv_bfloat16 *v_proj_ptr = v_proj_temp_buf + token_idx * KV_DIM;
             cudaMemcpy(v_cache_ptr, v_proj_ptr, num_tokens_to_copy * KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
         }
@@ -879,7 +880,7 @@ int main(int argc, char *argv[])
                 __nv_bfloat16 *k_proj_ptr = k_proj_batched_buffer + slot * KV_DIM;
                 cudaMemcpy(k_cache_ptr, k_proj_ptr, KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
 
-                __nv_bfloat16 *v_cache_ptr = (__nv_bfloat16 *)((char *)kv_cache + block * BLOCK_BYTES + BLOCK_SIZE * KV_DIM * sizeof(__nv_bfloat16) + token_in_block_idx + KV_DIM * sizeof(__nv_bfloat16));
+                __nv_bfloat16 *v_cache_ptr = (__nv_bfloat16 *)((char *)kv_cache + block * BLOCK_BYTES + V_OFFSET + token_in_block_idx + KV_DIM * sizeof(__nv_bfloat16));
                 __nv_bfloat16 *v_proj_ptr = v_proj_batched_buffer + slot * KV_DIM;
                 cudaMemcpy(v_cache_ptr, v_proj_ptr, KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
             }
@@ -887,7 +888,7 @@ int main(int argc, char *argv[])
             // synchronize block table on cpu with block table on gpu (for attention)
             cudaMemcpy(block_table_gpu, block_table.data(), MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int), cudaMemcpyHostToDevice);
 
-            pagedAttention(num_active_slots);
+            pagedAttention(layer, num_active_slots);
             for (int slot = 0; slot < num_active_slots; ++slot)
             {
                 int active_slot = active_slots[slot];

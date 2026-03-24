@@ -2,10 +2,34 @@
 #include <iostream>
 
 // TODO perhaps share these between main.cpp and kernels.cu to not duplicate them?
+
+constexpr int MAX_NEW_TOKENS_GENERATED = 20; // TODO: parameterize it with program arguments
+constexpr int B_TO_MB = 1024 * 1024;
+constexpr int B_TO_GB = 1024 * 1024 * 1024;
+constexpr int N_LAYERS = 16; // TODO: hardcoded for llama 3.2 1B, just like any other value for now
+constexpr int EMBEDDING_LENGTH = 2048;
+constexpr int HIDDEN_DIM = 8192;
+constexpr int KV_DIM = 512;
 constexpr int HEAD_DIM = 64;
 constexpr int NUM_Q_HEADS = 32;
-constexpr int MAX_SEQ_LEN = 2048;
+constexpr int NUM_K_HEADS = 8;
+constexpr int NUM_V_HEADS = 8;
 constexpr int GQA_Q_TO_K_RATIO = 4;
+constexpr int GQA_ATTN_SCORES_TO_V_RATIO = 4;
+constexpr int VOCAB_SIZE = 128256;
+constexpr int END_OF_TEXT_TOKEN_ID = 128001; // <|end_of_text|>
+constexpr int EOT_ID_TOKEN_ID = 128009;      // <|eot_id|>
+constexpr int MAX_SEQ_LEN = 2048;            // TODO: make it tunable
+constexpr int BATCH_SIZE = 2;                // TODO: not even close to being good
+constexpr int MAX_PROMPT_LEN = 512;          // TODO: arbitrary, tunable
+constexpr int MAX_BUFFER_SIZE = std::max(MAX_PROMPT_LEN, BATCH_SIZE);
+constexpr int BLOCK_SIZE = 16; // TODO: tunable as well, defined the size of a single page in pagedattn
+constexpr int V_OFFSET = BLOCK_SIZE * KV_DIM * sizeof(__nv_bfloat16);
+constexpr int BLOCK_BYTES = V_OFFSET * 2;                         // * 2 because K and V
+constexpr size_t KV_CACHE_SIZE_BYTES = 2ULL * 1024 * 1024 * 1024; // TODO: 2GB
+constexpr int MAX_BLOCKS_PER_SEQ = MAX_SEQ_LEN / BLOCK_SIZE;      // 2048 / 16 = 128
+constexpr int NUM_BLOCKS = KV_CACHE_SIZE_BYTES / BLOCK_BYTES;     // 2*1024*1024*1024/(16*512*2*2) = 65536
+constexpr int MAX_SEQUENCES = BATCH_SIZE;
 
 // prefill / shared
 
@@ -369,16 +393,30 @@ void softmaxDecode(__nv_bfloat16 *input, int seq_len)
 #endif
 }
 
-__global__ void pagedAttentionKernel()
+// inside a single particular thread that processes a single position of particular Q head for a particular sequence, for particular layer
+__global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16 *kv_cache, int *block_table_gpu, int *gpu_seq_lens, int *gpu_active_slots)
 {
-    int seq_id = blockIdx.x;
-    int q_head = blockIdx.y;
+    int active_slot = blockIdx.x; // active_slot == seq_id
+    int slot = gpu_active_slots[active_slot];
+    int q_head_id = blockIdx.y;
     int thread_id = threadIdx.x;
-
-    int k_head_idx = q_head / GQA_Q_TO_K_RATIO;
+    int kv_head_idx = q_head_id / GQA_Q_TO_K_RATIO;
+    __nv_bfloat16 q = q_proj[active_slot * EMBEDDING_LENGTH + q_head_id * HEAD_DIM + thread_id];
+    int seq_len = gpu_seq_lens[active_slot];
+    int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    for (int logical_block_idx = 0; logical_block_idx < num_blocks; ++logical_block_idx)
+    {
+        int physical_block = block_table_gpu[active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + logical_block_idx];
+        int tokens_in_block = min(seq_len - logical_block_idx * BLOCK_SIZE, BLOCK_SIZE);
+        for (int token = 0; token < tokens_in_block; ++token)
+        {
+            __nv_bfloat16 *k = (__nv_bfloat16 *)((char *)kv_cache + physical_block * BLOCK_BYTES + token * KV_DIM * sizeof(__nv_bfloat16) + kv_head_idx * HEAD_DIM * sizeof(__nv_bfloat16) + thread_id * sizeof(__nv_bfloat16));
+            float qk = (float)q * (float)*k;
+        }
+    }
 }
 
-void pagedAttention(int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16* kv_cache, int* block_table_gpu, )
+void pagedAttention(int layer, int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16 *kv_cache, int *block_table_gpu, int *gpu_seq_lens, int *gpu_active_slots)
 {
     pagedAttentionKernel<<<dim3(num_active_slots, NUM_Q_HEADS), HEAD_DIM>>>();
 }
