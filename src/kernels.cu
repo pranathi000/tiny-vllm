@@ -11,6 +11,7 @@ constexpr int EMBEDDING_LENGTH = 2048;
 constexpr int HIDDEN_DIM = 8192;
 constexpr int KV_DIM = 512;
 constexpr int HEAD_DIM = 64;
+constexpr float SQRT_HEAD_DIM = 8;
 constexpr int NUM_Q_HEADS = 32;
 constexpr int NUM_K_HEADS = 8;
 constexpr int NUM_V_HEADS = 8;
@@ -405,6 +406,12 @@ __global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloa
     __nv_bfloat16 q = q_proj[active_slot * EMBEDDING_LENGTH + q_head_id * HEAD_DIM + thread_id];
     int seq_len = gpu_seq_lens[active_slot];
     int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    // for online softmax https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
+    float current_max = -INFINITY;
+    float acc = 0.0f;
+    float d = 0.0f; // denominator, same name as in paper above
+
     for (int logical_block_idx = 0; logical_block_idx < num_blocks; ++logical_block_idx)
     {
         int physical_block = block_table_gpu[active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + logical_block_idx];
@@ -431,9 +438,15 @@ __global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloa
             __syncthreads();
             if (thread_id == 0)
             {
-                dot_products[0] += dot_products[1];
+                dot_products[0] = (dot_products[0] + dot_products[1]) / SQRT_HEAD_DIM;
             }
             __syncthreads();
+            float dot_product = dot_products[0];
+            // online softmax
+            if (dot_product > current_max)
+            {
+                current_max = dot_product;
+            }
         }
     }
 }
