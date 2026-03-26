@@ -659,9 +659,6 @@ int main(int argc, char *argv[])
     float attn_alpha = 1.0f / 8.0f;
     float attn_beta = 0.0f;
 
-    __nv_bfloat16 *decode_attn_scores;
-    cudaMalloc(&decode_attn_scores, sizeof(__nv_bfloat16) * MAX_SEQ_LEN * NUM_Q_HEADS);
-
     __nv_bfloat16 *attn_scores_v;
     float attn_scores_v_alpha = 1.0f;
     float attn_scores_v_beta = 0.0f;
@@ -880,7 +877,7 @@ int main(int argc, char *argv[])
                 __nv_bfloat16 *k_proj_ptr = k_proj_batched_buffer + slot * KV_DIM;
                 cudaMemcpy(k_cache_ptr, k_proj_ptr, KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
 
-                __nv_bfloat16 *v_cache_ptr = (__nv_bfloat16 *)((char *)kv_cache + block * BLOCK_BYTES + V_OFFSET + token_in_block_idx + KV_DIM * sizeof(__nv_bfloat16));
+                __nv_bfloat16 *v_cache_ptr = (__nv_bfloat16 *)((char *)kv_cache + block * BLOCK_BYTES + V_OFFSET + token_in_block_idx * KV_DIM * sizeof(__nv_bfloat16));
                 __nv_bfloat16 *v_proj_ptr = v_proj_batched_buffer + slot * KV_DIM;
                 cudaMemcpy(v_cache_ptr, v_proj_ptr, KV_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice);
             }
@@ -888,7 +885,7 @@ int main(int argc, char *argv[])
             // synchronize block table on cpu with block table on gpu (for attention)
             cudaMemcpy(block_table_gpu, block_table.data(), MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int), cudaMemcpyHostToDevice);
 
-            pagedAttention(layer, num_active_slots, q_proj, kv_cache, block_table_gpu, gpu_seq_lens, gpu_active_slots, buf_2048_2);
+            pagedAttention(layer, num_active_slots, q_proj, kv_cache, block_table_gpu, gpu_seq_lens, gpu_active_slots, buf_2048_1);
 
             o_proj = buf_2048_2;
             // (1, 2048) * (2048, 2048) -> (1, 2048)
@@ -902,7 +899,7 @@ int main(int argc, char *argv[])
                          weights.w_o[layer],
                          CUDA_R_16BF,
                          EMBEDDING_LENGTH,
-                         buf_2048_2,
+                         buf_2048_1,
                          CUDA_R_16BF,
                          EMBEDDING_LENGTH,
                          &o_proj_beta,
@@ -1028,6 +1025,19 @@ int main(int argc, char *argv[])
             if (max_token_idx == END_OF_TEXT_TOKEN_ID || max_token_idx == EOT_ID_TOKEN_ID || current_prompt_len[active_slot] == MAX_SEQ_LEN - 1)
             {
                 is_slot_free[active_slot] = true;
+                for (int layer = 0; layer < N_LAYERS; ++layer)
+                {
+                    for (int logical_block_idx = 0; logical_block_idx < MAX_BLOCKS_PER_SEQ; ++logical_block_idx)
+                    {
+                        int block_idx = active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + logical_block_idx;
+                        if (block_table[block_idx] != -1)
+                        {
+                            free_blocks.push_back(block_table[block_idx]);
+                            block_table[block_idx] = -1;
+                        }
+                    }
+                }
+                cudaMemcpy(block_table_gpu, block_table.data(), MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int), cudaMemcpyHostToDevice);
             }
             else
             {
