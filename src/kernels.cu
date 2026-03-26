@@ -414,7 +414,7 @@ __global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloa
 
     for (int logical_block_idx = 0; logical_block_idx < num_blocks; ++logical_block_idx)
     {
-        int physical_block = block_table_gpu[active_slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + logical_block_idx];
+        int physical_block = block_table_gpu[slot * N_LAYERS * MAX_BLOCKS_PER_SEQ + layer * MAX_BLOCKS_PER_SEQ + logical_block_idx];
         int tokens_in_block = min(seq_len - logical_block_idx * BLOCK_SIZE, BLOCK_SIZE);
         for (int token = 0; token < tokens_in_block; ++token)
         {
