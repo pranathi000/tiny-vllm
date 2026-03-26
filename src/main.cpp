@@ -7,7 +7,6 @@
 #define JSON_USE_IMPLICIT_CONVERSIONS 0
 #include "json.hpp"
 #include "kernels.cuh"
-#include "main.h"
 
 using json = nlohmann::json;
 
