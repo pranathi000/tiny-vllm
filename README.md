@@ -9,27 +9,32 @@ Model Serving with PagedAttention](https://arxiv.org/pdf/2309.06180)
 - [x] all computation with CUDA kernels
 - [x] KV cache
 - [x] static batching
-- [ ] continuous batching (in progress)
-- [ ] PagedAttention
+- [x] continuous batching 
+- [ ] PagedAttention (in progress)
 
 External libraries:
 
-- cuBLAS for all GEMMs
+- cuBLAS for GEMMs for projections
 - tokenizer from HuggingFace Transformers
 
 Main design choices:
-- Test on Llama 3.2 1B
+- Test on Llama 3.2 1B Instruct
 - BF16 (because Llama 3.2 1B uses it)
 - Single GPU (tested on RTX 5090 32GB)
 
 ### use
+for development
 
+```sh
+./full-test.sh
 ```
+
+```sh
 python python/tokenizer.py "The capital of France is" | ./tiny-vllm
 ```
 
 ### model architecture
-```
+```py
 LlamaForCausalLM(
   (model): LlamaModel(
     (embed_tokens): Embedding(128256, 2048)
@@ -57,5 +62,9 @@ LlamaForCausalLM(
   (lm_head): Linear(in_features=2048, out_features=128256, bias=False)
 )
 ```
+
+### useful links
+- "From Online Softmax to FlashAttention" by Zihao Ye https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf
+- vLLM paper https://arxiv.org/pdf/2309.06180
 
 Jędrzej Maczan, 2026, Apache License 2.0

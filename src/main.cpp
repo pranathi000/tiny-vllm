@@ -888,70 +888,7 @@ int main(int argc, char *argv[])
             // synchronize block table on cpu with block table on gpu (for attention)
             cudaMemcpy(block_table_gpu, block_table.data(), MAX_SEQUENCES * N_LAYERS * MAX_BLOCKS_PER_SEQ * sizeof(int), cudaMemcpyHostToDevice);
 
-            pagedAttention(layer, num_active_slots);
-            for (int slot = 0; slot < num_active_slots; ++slot)
-            {
-                int active_slot = active_slots[slot];
-                int seq_len = current_prompt_len[active_slot] + 1;
-                for (int i = 0; i < NUM_Q_HEADS; ++i)
-                {
-                    int k_head_idx = i / GQA_Q_TO_K_RATIO;
-                    __nv_bfloat16 *q_head = q_proj + slot * EMBEDDING_LENGTH + i * HEAD_DIM;
-                    __nv_bfloat16 *k_head = k_proj[active_slot][layer] + k_head_idx * HEAD_DIM;
-                    __nv_bfloat16 *attn_score_head = decode_attn_scores + MAX_SEQ_LEN * i;
-
-                    cublasGemmEx(cublas_handle,
-                                 CUBLAS_OP_T,
-                                 CUBLAS_OP_N,
-                                 seq_len,  // m
-                                 1,        // n
-                                 HEAD_DIM, // k
-                                 &attn_alpha,
-                                 k_head,
-                                 CUDA_R_16BF,
-                                 KV_DIM, // lda
-                                 q_head,
-                                 CUDA_R_16BF,
-                                 EMBEDDING_LENGTH, // ldb
-                                 &attn_beta,
-                                 attn_score_head,
-                                 CUDA_R_16BF,
-                                 MAX_SEQ_LEN, // ldc
-                                 CUBLAS_COMPUTE_32F,
-                                 CUBLAS_GEMM_DEFAULT);
-                }
-
-                softmaxDecode(decode_attn_scores, seq_len);
-
-                attn_scores_v = buf_2048_1;
-                for (int i = 0; i < NUM_Q_HEADS; ++i)
-                {
-                    int v_head_idx = i / GQA_ATTN_SCORES_TO_V_RATIO;
-                    __nv_bfloat16 *attn_scores_head = decode_attn_scores + i * MAX_SEQ_LEN;
-                    __nv_bfloat16 *v_head = v_proj[active_slot][layer] + v_head_idx * HEAD_DIM;
-                    __nv_bfloat16 *output_attn_scores_head = attn_scores_v + slot * EMBEDDING_LENGTH + i * HEAD_DIM;
-
-                    cublasGemmEx(cublas_handle,
-                                 CUBLAS_OP_N,
-                                 CUBLAS_OP_N,
-                                 HEAD_DIM, // m
-                                 1,        // n
-                                 seq_len,  // k
-                                 &attn_scores_v_alpha,
-                                 v_head,
-                                 CUDA_R_16BF,
-                                 KV_DIM, // lda
-                                 attn_scores_head,
-                                 CUDA_R_16BF,
-                                 MAX_SEQ_LEN, // ldb
-                                 &attn_scores_v_beta,
-                                 output_attn_scores_head,
-                                 CUDA_R_16BF,
-                                 EMBEDDING_LENGTH, // ldc
-                                 CUBLAS_COMPUTE_32F,
-                                 CUBLAS_GEMM_DEFAULT);
-                }
-            }
+            pagedAttention(layer, num_active_slots, q_proj, kv_cache, block_table_gpu, gpu_seq_lens, gpu_active_slots, buf_2048_2);
 
             o_proj = buf_2048_2;
             // (1, 2048) * (2048, 2048) -> (1, 2048)
@@ -965,7 +902,7 @@ int main(int argc, char *argv[])
                          weights.w_o[layer],
                          CUDA_R_16BF,
                          EMBEDDING_LENGTH,
-                         attn_scores_v,
+                         buf_2048_2,
                          CUDA_R_16BF,
                          EMBEDDING_LENGTH,
                          &o_proj_beta,

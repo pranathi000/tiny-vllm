@@ -16,4 +16,4 @@ void ropeDecode(__nv_bfloat16 *input, int position_in_sequence, int proj_dim);
 void softmaxDecode(__nv_bfloat16 *input, int seq_len);
 
 // pagedattn
-void pagedAttention(int num_active_slots);
+void pagedAttention(int layer, int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16 *kv_cache, int *block_table_gpu, int *gpu_seq_lens, int *gpu_active_slots, __nv_bfloat16 *output);

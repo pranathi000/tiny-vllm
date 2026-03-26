@@ -395,7 +395,7 @@ void softmaxDecode(__nv_bfloat16 *input, int seq_len)
 }
 
 // inside a single particular thread that processes a single position of particular Q head for a particular sequence, for particular layer
-__global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16 *kv_cache, int *block_table_gpu, int *gpu_seq_lens, int *gpu_active_slots)
+__global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16 *kv_cache, int *block_table_gpu, int *gpu_seq_lens, int *gpu_active_slots, __nv_bfloat16 *output)
 {
     __shared__ float dot_products[2];
     int active_slot = blockIdx.x; // active_slot == seq_id
@@ -419,6 +419,7 @@ __global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloa
         for (int token = 0; token < tokens_in_block; ++token)
         {
             __nv_bfloat16 *k = (__nv_bfloat16 *)((char *)kv_cache + physical_block * BLOCK_BYTES + token * KV_DIM * sizeof(__nv_bfloat16) + kv_head_idx * HEAD_DIM * sizeof(__nv_bfloat16) + thread_id * sizeof(__nv_bfloat16));
+            __nv_bfloat16 *v = (__nv_bfloat16 *)((char *)kv_cache + physical_block * BLOCK_BYTES + V_OFFSET + token * KV_DIM * sizeof(__nv_bfloat16) + kv_head_idx * HEAD_DIM * sizeof(__nv_bfloat16) + thread_id * sizeof(__nv_bfloat16));
             float qk = (float)q * (float)*k;
             // tree reduction within current warp, thread 0 gets sum of all 32 elements within warp
             // could be done with __syncthreads but accessing memory of other threads in warp is op
@@ -443,15 +444,22 @@ __global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloa
             __syncthreads();
             float dot_product = dot_products[0];
             // online softmax
+            float new_max = current_max;
             if (dot_product > current_max)
             {
-                current_max = dot_product;
+                new_max = dot_product;
             }
+            float correction_factor = expf(current_max - new_max);
+            current_max = new_max;
+            float exp_score = expf(dot_product - current_max);
+            d = d * correction_factor + exp_score;
+            acc = acc * correction_factor + exp_score * (float)*v;
         }
     }
+    output[active_slot * EMBEDDING_LENGTH + q_head_id * HEAD_DIM + thread_id] = acc / d;
 }
 
-void pagedAttention(int layer, int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16 *kv_cache, int *block_table_gpu, int *gpu_seq_lens, int *gpu_active_slots)
+void pagedAttention(int layer, int num_active_slots, __nv_bfloat16 *q_proj, __nv_bfloat16 *kv_cache, int *block_table_gpu, int *gpu_seq_lens, int *gpu_active_slots, __nv_bfloat16 *output)
 {
-    pagedAttentionKernel<<<dim3(num_active_slots, NUM_Q_HEADS), HEAD_DIM>>>();
+    pagedAttentionKernel<<<dim3(num_active_slots, NUM_Q_HEADS), HEAD_DIM>>>(layer, num_active_slots, q_proj, kv_cache, block_table_gpu, gpu_seq_lens, gpu_active_slots, output);
 }
