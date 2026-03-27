@@ -23,7 +23,9 @@ Make yourself a hot beverage and let's begin
 
 **ETA: end of April 2026**
 
-## Intro: LLM, vLLM, models, servers, inference servers, ???
+After I finish text, I want to draw and add illustrations
+
+## Intro: LLM, vLLM, models, inference servers, ???
 
 It's easy to get lost with so much going on recent years. Let's unpack it
 
@@ -48,14 +50,11 @@ You can build and run it on any platform, with minor changes, assuming you have 
 
 I suggest you to fork this repo and make the necessary adjustments so it works on your machine and then create a pull request to [jmaczan/tiny-vllm](https://github.com/jmaczan/tiny-vllm) and upstream your changes for benefit of another readers
 
-Things I'm sure you will need:
-- [CUDA Toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/)
-
 The exact setup on which I develop and test it:
 - Linux (6.19.8 x64_64)
-- CUDA (13.1)
+- [CUDA Toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/) (13.1)
 - C++ 17
-- GCC (15.2.1)
+- [GCC](https://gcc.gnu.org/) (15.2.1)
 - The only external dependency you will pull in is JSON parser [nlohmann/json](https://github.com/nlohmann/json) 3.12.0, which is a single header file [include/json.hpp](include/json.hpp)
 - AMD CPU (Ryzen 7 9800X3D)
 - NVIDIA GPU (RTX 5090)
@@ -69,13 +68,13 @@ If you fail to build or run it and your AI of choice won't be able to help, plea
 
 First thing you need to do is to download a LLM which we will use to run inference on. I choose Llama 3.2 1B Instruct, because it's easy, small, tuned for dialogs and good enough for us. From perspective of us, the engineers who build an inference server, the model is just a single file containing weights.
 
-The model is in [Safetensors format](https://huggingface.co/docs/safetensors/index). There exist other formats, like [Pickle](https://docs.python.org/3/library/pickle.html) and [Parquet](https://parquet.apache.org/docs/file-format/). Safetensors is just very popular and widely used, and the model we picked it hosted in Safetensors
+The model is in [Safetensors format](https://huggingface.co/docs/safetensors/index). There exist other formats, like [Pickle](https://docs.python.org/3/library/pickle.html) and [Parquet](https://parquet.apache.org/docs/file-format/). Safetensors is just very popular and widely used, and the model we picked is hosted in Safetensors
 
 You face the first design decision now. Do you want to make your inference server architecture independent, so it can run any arbitrary model, as long as you implement the operations it needs, or do you want to start simple and focus on our model of choice?
 
 Whatever you decide, it's always easier to develop on a single model and then generalize, than try to make it flexible from the beginning when you're not sure how the code will look like at the end. You can always get back to it and update when you choose to.
 
-If you want to make your server model independent, you need to allocate the memory, set the model data shape and type dynamically based on Safetensors header and implement more operations, making sure to cover all operations used by all models that you want to support. Probably you would still need to provide some blueprints of the models architecture, because the Safetensors file doesn't tell you which operation to run with this data, in what order etc. I'm not sure what's the optimal approach to do that, but if you figure it out, either on your own or by reading through vLLM/TensorRT/others code, feel invited to share your findings!
+If you want to make your server model-independent, you need to allocate the memory, set the model data shape and type dynamically based on Safetensors header and implement more operations, making sure to cover all operations used by all models that you want to support. Probably you would still need to provide some blueprints of the models architecture, because the Safetensors file doesn't tell you which operation to run with this data, in what order etc. I'm not sure what's the optimal approach to do that, but if you figure it out, either on your own or by reading through vLLM/[TensorRT](https://github.com/NVIDIA/TensorRT)/others code, feel invited to share your findings
 
 I will assume that we just code our server for Llama 3.2 1B Instruct architecture. Here's a dump of [Hugging Face Transformers](https://huggingface.co/docs/transformers/index), with this model loaded, so we can inspect what operations we need to implement and what data shape and data types we need to use:
 
@@ -110,7 +109,49 @@ LlamaForCausalLM(
 
 Let's dissect it.
 
+First of all, we don't really learn neither the order of operations or data type here. But [model card](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) on Hugging Face page tell us that weights are in [BF16](https://en.wikipedia.org/wiki/Bfloat16_floating-point_format) format. We will go back to the format soon. We need to understand the order of operations to know how to code it. Sebastian Raschka has a gallery of LLM architectures and it shows nicely how the operations are organized - see [here (the left one)](https://magazine.sebastianraschka.com/i/168650848/61-qwen3-dense).
+
+So the flow is like this:
+1. Send some text to the model
+2. Turn it into tokens (a new concept, we didn't mention it yet)
+3. Retrieve an embedding for each token
+4. 16 transformer blocks, also called layers, which consist of:
+  - RMS Norm
+  - Residual connection
+  - Masked grouped-query attention, which consists of:
+    - Q projection
+    - K projection
+    - V projection
+    - RoPE with Q projection
+    - RoPE with K projection
+    - Attention
+    - Attention scores
+    - Causal mask
+    - Softmax
+    - Residual connection
+    - Attention scores with V projection
+  - O projection (output projection)
+  - Residual connection add
+  - RMS Norm
+  - [Feed forward](https://en.wikipedia.org/wiki/Feedforward_neural_network) (like in first neural networks, [Multilayer perceptron](https://en.wikipedia.org/wiki/Multilayer_perceptron)), which consists of:
+    - Gate, first linear layer
+    - Up, second linear layer
+    - [SiLU](https://arxiv.org/pdf/1702.03118) activation function, similar to [ReLU](https://en.wikipedia.org/wiki/Rectified_linear_unit) but looking more like a sigmoid
+    - Down, third linear layer
+    - Residual connection add
+5. RMS Norm
+6. Linear output
+7. Argmax
+
+After these steps, we should get our first token produced by the language model ran on our server.
+
 ## BF16
+
+Incoming!
+
+## Working with GPU memory
+
+Incoming!
 
 ## Single token inference
 
@@ -121,6 +162,24 @@ Incoming!
 Incoming!
 
 ## GQA
+
+Incoming!
+
+## Attention
+Incoming!
+## RoPE
+Incoming!
+## SiLU
+Incoming!
+## Residual connections
+Incoming!
+## Causal mask
+Incoming!
+## RMS Norm
+Incoming!
+## Argmax
+Incoming!
+## cublasGemmEx
 
 Incoming!
 
@@ -162,7 +221,7 @@ Memory management idea from operating systems used in LLM inference
 
 Incoming!
 
-## Custom Paged Attention CUDA kernel
+## Paged Attention CUDA kernel
 
 Incoming!
 
