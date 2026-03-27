@@ -4,6 +4,10 @@ You're going to build a high performance LLM inference engine with C++ and CUDA 
 
 We will learn a lot along the way, make mistakes and derive the ideas and maths from scratch
 
+This repository consists of two things: 1. a full source code of the inference server and 2. a course where I lead you through the process of implementing the engine. Feel invited to use it as a learning tool on your learning path or if you are a lecturer, feel welcome to use it as a teaching resource at your university
+
+The inference engine consists of:
+
 - [x] load a real LLM model from safetensors (Llama 3.2 1B Instruct)
 - [x] full LLM forward pass (prefill + decode)
 - [x] all computation with CUDA kernels
@@ -32,15 +36,37 @@ The process of going from 0 to LLM writing a text is like this:
 2. **Train the model** - The chosen model architecture is initialized with dummy weights. They write a script which again uses PyTorch or similar to run learning algorithm like backpropagation on a lot of hardware, like [GPUs](https://en.wikipedia.org/wiki/Graphics_processing_unit) and [TPUs](https://en.wikipedia.org/wiki/Tensor_Processing_Unit). This phase burns a lot of energy, money and computational power. The product of training phase is a file with model weights, in some format, like [safetensors format](https://huggingface.co/docs/safetensors/index). So, the training phase is finding such a set of weights which produces good text using the given architecture
 3. **Serve the model (we are here)** - The file with weights can't be ran on a computer. It's not an executable. It's a lot of numbers. The architecture can't be ran either - it's just a plan, a blueprint, a description of computation. To actually run the model, we need a program that turns the architecture and its operations into executable code and uses file with model weights to load the weights into the architecture. Once you write a program that implements the operations and once the program loads the weights (weights are loaded in the runtime of the program, at the startup), you can finally send prompts to the model and get a meaningful response. Generating an output from a model is called inference. That's why what we build here is called an inference server or inference engine
 
-Knowing the reason behind a need for an inference server, let's think why we build it in C++ and CUDA. It's because we want to maximize efficient use of the hardware and get high performance. It means that we want to get responses fast and we want to be able to handle multiple prompts at the same time. CUDA is the whole ecosystem, but also a language that you use to write code that runs on GPUs. We need to write code on GPUs, because many operations inside LLM are multiplying and adding multiple numbers. If you need to do small amout of math, CPU enough. If a lot, GPU better. LLMs are mostly about multiplying the matrices, which boils down to computing dot products of two vectors, for many numbers and for many vectors.
+Knowing the reason behind a need for an inference server, let's think why we build it in C++ and CUDA. It's because we want to maximize efficient use of the hardware and get high performance. It means that we want to get responses fast and we want to be able to handle multiple prompts at the same time. CUDA is the whole ecosystem, but also a language that you use to write code that runs on GPUs. We need to write code on GPUs, because many operations inside LLM are multiplying and adding multiple numbers. If you need to do small amount of math, CPU enough. If a lot, GPU better. LLMs are mostly about multiplying the matrices, which boils down to computing dot products of two vectors, for many numbers and for many vectors. The math of LLMs is simple, we will need basics of linear algebra and you can learn while coding and fill the gaps on the go. I find this way of JIT learning the most effective and perhaps you will like it too
 
-My take about a relationship between AI and computation which you maybe find useful is that the intelligence comes from a lot of parameters of the model and a lot of computation of input values using these parameters. There is no single element, that you can point to and say - this is what makes the model intelligent or useful. Every part of element you can replace with a different one and get different tradeoffs. I hope I won't forget to get back to this topic later when talking about math of attention. Because the default attention mechanism is very computationally complex. And this complexity can be challenged and in fact people do it and figure out alternative attention mechanisms, like [linear attention](https://haileyschoelkopf.github.io/blog/2024/linear-attn/)
+My take on a relationship between AI and computation which you maybe find useful is that **the intelligence comes from a lot of parameters of the model and a lot of computation of input values using these parameters**. There is no a single element, that you can point to and say: "this is what makes the model intelligent or useful". Every part of the model you can replace with a different one and get different tradeoffs in return, like trade accuracy for complexity.  I hope I won't forget to get back to this topic later, when we touch the math of attention. Because - the default attention mechanism is very computationally complex (O(n^2*d)). And this complexity can be challenged and in fact people do it and figure out alternative attention mechanisms, like [linear attention](https://haileyschoelkopf.github.io/blog/2024/linear-attn/). If more people will find this course useful, I will think about another one, about ML compilers (a practical one in Python or C++ + some SSA theory) or about alternative attention mechanisms (math + CUDA kernels). If you are interested, please let me know! If you will find this course valuable, please let other people know about it
 
 > Out of scope: The training phase of an LLM is something we don't do in this course. We take a trained LLM and write a program which will run this LLM fast on NVIDIA GPU for multiple requests in parallel. If you want to train your own LLM, I strongly recommend sensei Karpathy repositories like [nanoGPT](https://github.com/karpathy/nanoGPT) and [llm.c](https://github.com/karpathy/llm.c) and his [YouTube channel](https://www.youtube.com/@AndrejKarpathy). Similarly, we don't design the model, but the tensor libraries are also fascinating topic and worth understanding from scratch. George Hotz's [tinygrad](https://github.com/tinygrad/tinygrad) is a project which implements a tensor library with a very little amount of code, so if you want to get inspired and learn the internals, it's a good place to do it (also [their Discord is nice](https://discord.com/invite/ZjZadyC7PK))! And since I brought the Discord, I want to recommend you [Mark Saroufim's](https://www.marksaroufim.com/) [GPU MODE](https://discord.com/invite/gpumode). Many great people hanging out there! And if you feel lost with what is going on here, and you are new on your AI/ML journey, start with [Jeremy Howard and Rachel Thomas](https://www.fast.ai/about) [fastai book](https://course.fast.ai/Resources/book.html). I conveniently omit the data science and engineering part here, because I don't know much about it. Probably [Kaggle](https://www.kaggle.com/) can be a good place to start with it and learn on-hands. Last but not least, we're going to code in C++ and CUDA and use [cuBLAS](https://developer.nvidia.com/cublas) where applicable. You can learn on the go. NVIDIA [official resources](https://docs.nvidia.com/cuda/cuda-programming-guide/) are good and helpful 
 
+## Technical prerequisities
+
+You can build and run it on any platform, with minor changes, assuming you have a NVIDIA GPU. You might need to adjust some paths, like CUDA or GCC in [c_cpp_propertiesjson](.vscode/c_cpp_properties.json) or NVCC in [CMakeLists.txt](CMakeLists.txt)
+
+I suggest you to fork this repo and make the necessary adjustments so it works on your machine and then create a pull request to [jmaczan/tiny-vllm](https://github.com/jmaczan/tiny-vllm) and upstream your changes for benefit of another readers
+
+Things I'm sure you will need:
+- [CUDA Toolkit](https://docs.nvidia.com/cuda/cuda-installation-guide-linux/)
+
+The exact setup on which I develop and test it:
+- Linux (6.19.8 x64_64)
+- CUDA (13.1)
+- C++ 17
+- GCC (15.2.1)
+- The only external dependency you will pull in is JSON parser [nlohmann/json](https://github.com/nlohmann/json) 3.12.0, which is a single header file [include/json.hpp](include/json.hpp)
+- AMD CPU (Ryzen 7 9800X3D)
+- NVIDIA GPU (RTX 5090)
+
+Install the dependencies and run the program with `./test.sh` - it will build it and immediately execute it
+
+If you fail to build or run it and your AI of choice won't be able to help, please open an Issue on GitHub - I will try to help. Make sure to provide all useful context
+
 ## Safetensors
 
-Incoming!
+
 
 ## Single token inference
 
