@@ -1,6 +1,6 @@
 # tiny-vllm
 
-You're going to build a high performance LLM inference engine with C++ and CUDA - tiny-vllm, a younger and smaller sibling of [vLLM]((https://arxiv.org/pdf/2309.06180))
+You're going to build a high performance LLM inference engine with C++ and CUDA - tiny-vllm, a younger and smaller sibling of [vLLM](https://github.com/vllm-project/vllm)
 
 We will learn a lot along the way, make mistakes and derive the ideas and maths from scratch
 
@@ -11,14 +11,15 @@ We will learn a lot along the way, make mistakes and derive the ideas and maths 
 - [x] static batching
 - [x] continuous batching
 - [x] [online softmax, FlashAttention-like](https://courses.cs.washington.edu/courses/cse599m/23sp/notes/flashattn.pdf)
-- [x] PagedAttention
+- [x] [PagedAttention](https://arxiv.org/pdf/2309.06180)
 
 Make yourself a hot beverage and let's begin
 
+# The course below is in progress
 
-# The course below is in progress. ETA end of April 2026
+**ETA: end of April 2026**
 
-## LLM, vLLM, models, servers, inference servers, ???
+## Intro: LLM, vLLM, models, servers, inference servers, ???
 
 It's easy to get lost with so much going on recent years. Let's unpack it
 
@@ -29,9 +30,71 @@ The process of going from 0 to LLM writing a text is like this:
 0. **Design the model** - engineers and researchers use high level language like Python with tensor library like [PyTorch](https://github.com/pytorch/pytorch) or [tinygrad](https://github.com/tinygrad/tinygrad) to design model's architecture. They train small versions of the model, make experiments with different operations, data and hyperparameters (parameters for operations). It's the phase of figuring out the specification
 1. **Implement the model** - Once they decide on final model architecture and prepare the data for training, they write the code that defines the final model. It can be also in PyTorch or similar
 2. **Train the model** - The chosen model architecture is initialized with dummy weights. They write a script which again uses PyTorch or similar to run learning algorithm like backpropagation on a lot of hardware, like [GPUs](https://en.wikipedia.org/wiki/Graphics_processing_unit) and [TPUs](https://en.wikipedia.org/wiki/Tensor_Processing_Unit). This phase burns a lot of energy, money and computational power. The product of training phase is a file with model weights, in some format, like [safetensors format](https://huggingface.co/docs/safetensors/index). So, the training phase is finding such a set of weights which produces good text using the given architecture
-3. **Serve the model (we are here)** - The file with weights can't be ran on a computer. It's not an executable. It's a lot of numbers. The architecture can't be ran either - it's just a plan, a blueprint, a description of computation. To actually run the model, we need a program that turns the architecture and its operations into executable code and uses file with model weights to load the weights into the architecture. Once you write a program that implements the operations and once the program loads the weights (weights are loaded in the runtime of the program, at the startup), you can finally send prompts to the model and get meaningful response
+3. **Serve the model (we are here)** - The file with weights can't be ran on a computer. It's not an executable. It's a lot of numbers. The architecture can't be ran either - it's just a plan, a blueprint, a description of computation. To actually run the model, we need a program that turns the architecture and its operations into executable code and uses file with model weights to load the weights into the architecture. Once you write a program that implements the operations and once the program loads the weights (weights are loaded in the runtime of the program, at the startup), you can finally send prompts to the model and get a meaningful response. Generating an output from a model is called inference. That's why what we build here is called an inference server or inference engine
 
-> The training phase of an LLM is something we don't do in this course. We take a trained LLM and write a program which will run this LLM fast on NVIDIA GPU for multiple requests in parallel. If you want to train your own LLM, I strongly recommend sensei Karpathy repositories like [nanoGPT](https://github.com/karpathy/nanoGPT) and [llm.c](https://github.com/karpathy/llm.c) and his [YouTube channel](https://www.youtube.com/@AndrejKarpathy). Similarly, we don't design the model, but the tensor libraries are also fascinating topic and worth understanding from scratch. Geohot's [tinygrad](https://github.com/tinygrad/tinygrad) is a project which 
+Knowing the reason behind a need for an inference server, let's think why we build it in C++ and CUDA. It's because we want to maximize efficient use of the hardware and get high performance. It means that we want to get responses fast and we want to be able to handle multiple prompts at the same time. CUDA is the whole ecosystem, but also a language that you use to write code that runs on GPUs. We need to write code on GPUs, because many operations inside LLM are multiplying and adding multiple numbers. If you need to do small amout of math, CPU enough. If a lot, GPU better. LLMs are mostly about multiplying the matrices, which boils down to computing dot products of two vectors, for many numbers and for many vectors.
+
+My take about a relationship between AI and computation which you maybe find useful is that the intelligence comes from a lot of parameters of the model and a lot of computation of input values using these parameters. There is no single element, that you can point to and say - this is what makes the model intelligent or useful. Every part of element you can replace with a different one and get different tradeoffs. I hope I won't forget to get back to this topic later when talking about math of attention. Because the default attention mechanism is very computationally complex. And this complexity can be challenged and in fact people do it and figure out alternative attention mechanisms, like [linear attention](https://haileyschoelkopf.github.io/blog/2024/linear-attn/)
+
+> Out of scope: The training phase of an LLM is something we don't do in this course. We take a trained LLM and write a program which will run this LLM fast on NVIDIA GPU for multiple requests in parallel. If you want to train your own LLM, I strongly recommend sensei Karpathy repositories like [nanoGPT](https://github.com/karpathy/nanoGPT) and [llm.c](https://github.com/karpathy/llm.c) and his [YouTube channel](https://www.youtube.com/@AndrejKarpathy). Similarly, we don't design the model, but the tensor libraries are also fascinating topic and worth understanding from scratch. George Hotz's [tinygrad](https://github.com/tinygrad/tinygrad) is a project which implements a tensor library with a very little amount of code, so if you want to get inspired and learn the internals, it's a good place to do it (also [their Discord is nice](https://discord.com/invite/ZjZadyC7PK))! And since I brought the Discord, I want to recommend you [Mark Saroufim's](https://www.marksaroufim.com/) [GPU MODE](https://discord.com/invite/gpumode). Many great people hanging out there! And if you feel lost with what is going on here, and you are new on your AI/ML journey, start with [Jeremy Howard and Rachel Thomas](https://www.fast.ai/about) [fastai book](https://course.fast.ai/Resources/book.html). I conveniently omit the data science and engineering part here, because I don't know much about it. Probably [Kaggle](https://www.kaggle.com/) can be a good place to start with it and learn on-hands. Last but not least, we're going to code in C++ and CUDA and use [cuBLAS](https://developer.nvidia.com/cublas) where applicable. You can learn on the go. NVIDIA [official resources](https://docs.nvidia.com/cuda/cuda-programming-guide/) are good and helpful 
+
+## Safetensors
+
+Incoming!
+
+## Single token inference
+
+Incoming!
+
+## Prefill vs decode
+
+Incoming!
+
+## GQA
+
+Incoming!
+
+## cuBLAS column-major trick
+
+Incoming!
+
+## Why KV cache exists
+
+Incoming!
+
+## Buffer reuse
+
+Lifetimes analysis
+
+Incoming!
+
+## Static batching
+
+Incoming!
+
+## Continuous batching
+
+Incoming!
+
+## Online softmax
+
+Math derivation
+
+Incoming!
+
+## Paged Attention
+
+Incoming!
+
+Memory management idea from operating systems used in LLM inference
+
+## Paged KV cache
+
+Incoming!
+
+## Custom Paged Attention CUDA kernel
+
+Incoming!
 
 ### model architecture
 ```py
