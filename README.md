@@ -70,6 +70,18 @@ First thing you need to do is to download a LLM which we will use to run inferen
 
 The model is in [Safetensors format](https://huggingface.co/docs/safetensors/index). There exist other formats, like [Pickle](https://docs.python.org/3/library/pickle.html) and [Parquet](https://parquet.apache.org/docs/file-format/). Safetensors is just very popular and widely used, and the model we picked is hosted in Safetensors
 
+Let's stop for a moment and understand the Safetensors format before we move on.
+
+A safetensor file consists of 3 sections, always in this order: header size, header and tensors data. Header size is always 8 bytes. These 8 bytes are an unsigned 64-bit integer, which says how many bytes the actual header takes.
+
+```cpp
+std::ifstream safetensors_file("model.safetensors", std::ios_base::binary);
+uint64_t header_size;
+safetensors_file.read(reinterpret_cast<char *>(&header_size), 8);
+```
+
+The header is a JSON that contains about all the tensors inside the file. JSON is just a group of pairs <key, value>, where key is a unique string with a tensor name and value is another JSON object, containing info about this tensor. Every key in this JSON is a name of the tensor, except a single key which is called `__metadata__`, probably for some additonal info when necessary (we won't use it, specs say it's a "special key for storing free form text-to-text map). Every value is a JSON containing three keys - `dtype`, `shape` and `offsets`. `dtype` says what data type the tensor is stored in. `shape` says the [dimensions of a tensor](https://en.wikipedia.org/wiki/Tensor#As_multidimensional_arrays) and `offsets` say where the tensor is stored, within the tensors data section. Every `shape` is a list of ints of unknown length and every `offsets` value is a vector of exactly two ints. First element says where the tensor begins and last element says where the tensor ends.
+
 You face the first design decision now. Do you want to make your inference server architecture independent, so it can run any arbitrary model, as long as you implement the operations it needs, or do you want to start simple and focus on our model of choice?
 
 Whatever you decide, it's always easier to develop on a single model and then generalize, than try to make it flexible from the beginning when you're not sure how the code will look like at the end. You can always get back to it and update when you choose to.
@@ -145,7 +157,7 @@ So the flow is like this:
 
 After these steps, we should get our first token produced by the language model ran on our server.
 
-## BF16
+## BF16 vs FP16
 
 Incoming!
 

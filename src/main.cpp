@@ -95,7 +95,6 @@ int loadWeights(Weights &weights)
 
     // READ SAFETENSORS HEADER SIZE
     uint64_t header_size;
-    // reinterpret_cast<char*>(&header_size) gives me an address of header_size
     safetensors_file.read(reinterpret_cast<char *>(&header_size), 8);
     // READ SAFETENSORS HEADER
     std::string header;
