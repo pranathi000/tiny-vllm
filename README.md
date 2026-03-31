@@ -173,7 +173,24 @@ Ok, so now let's think what could we do instead. The simplest alternative would 
 
 So if there are fixed-point numbers, there inevitably need to be non-fixed-point numbers. Let's just think about it, loosely. Non-fixed-point could mean that the dot (the point) can move around. The fractional part can be longer or shorter. Sounds like more memory efficient solution.
 
-< In progress here >
+Floating-point numbers, like all other numeric types are represented as a sequences of bits. All of them have slightly different design choices, so let's focus on [regular 16-bit float](https://en.wikipedia.org/wiki/Half-precision_floating-point_format#IEEE_754_half-precision_binary_floating-point_format:_binary16) (float16, FP16, IEEE 754-2008).
+
+Float16 and many other floating-point numbers work in a similar way. They consists of three sections: sign, exponent and fraction. In total they take 16 bits.
+
+```
+[ sign | exponent  | fraction            ]
+[ 0    | 0 1 0 0 1 | 0 0 1 0 0 0 0 0 0 0 ]
+```
+
+Sign is a single bit, where 0 means the numbers is positive and 1 that the number is negative.
+
+Exponent is 5 bits and fraction is 10 bits. The sizes of exponent and fraction are main differences between different types of floating-point numbers.
+
+Let's understand how it works now. To < TODO >
+
+But this was float16. And our reference model (Llama 3.2 1B Instruct) used bfloat16 (BF16). It turns out bfloat16 is widely used in many different models. It also takes 16 bits, but it's exponent is longer (8 bits) than regular float16 (5 bits). First interesting thing about bfloat16 is that the size of exponent is actually the same as of twice bigger 32-bit float (float32, FP32, float), which also has 8 bit exponent. So comparing with float16, bfloat16 trades 3 bits of fraction to gain 3 bits of exponent. So naturally, the fraction shrinks and it's only 7 bits now. So to sum up - bfloat16 is 1 sign bit, 8 bit sign exponent and 7 bit fraction.
+
+Why bfloat16 matters? < TODO >
 
 If you want to test your understanding, Wikipedia page about half-precision floating-point formats has [lots of good examples](https://en.wikipedia.org/wiki/Half-precision_floating-point_format#Half_precision_examples)
 
