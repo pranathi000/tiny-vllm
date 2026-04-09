@@ -615,62 +615,11 @@ Congrats to you, you finished your first CUDA kernel!
 
 Let's move back from computation and low-level programming to semantics/meaning of what we just did. Notice that while all these embeddings we retrieve for input tokens have some encoded meaning within them, they don't know about each other. They don't know their position within a text we provided as an input. They don't know what tokens they are surrounded with. They don't know the conversation history, etc etc. This understanding will be build and stored as K and V projections.
 
-## Prefill vs decode
+## RMSNorm and parallel reduction in CUDA
 
-An interesting fact about LLM inference is that it's not exactly the same process for the first predicted token vs all the next tokens. To predict the first token, you need to process all the input tokens. The input tokens are user's prompt or the chat history. All the computation that we need to do to get the first predicted token is called _prefill_. Everything that will happen after is called _decode_. 
+Look back at the sequence of operations in our model (section [Safetensors and your model](#safetensors-and-your-model)). After we retrieve the embeddings for our tokens, it's time for [RMSNorm](https://arxiv.org/abs/1910.07467). Unlike embeddings gather, it's a first operation that will run in layers. Our model, Llama 3.2 1B, has 16 layers. RMSNorm takes our retrieved embeddings and - using model weights for a rms norm `weights.input_layernorm[layer]` - runs RMSNorm function. RMSNorm is an operation that modifies all elements. It normalizes all the elements. To do that, first it needs to see all the elements and compute their [root mean square](https://en.wikipedia.org/wiki/Root_mean_square) sum.
 
-Most of the computation, like Q projection, attention, attention scores, feed-forward (MLP) is thrown away as soon as it's passed to the next operation - both in prefill and decode. The useful mental model is that the only thing that you preserve at every stage of LLM inference is K projection, V projection and what is the last generated token. That's it. There are interesting implications of it, for instance - you could stop the inference, copy your K and V projections and last generated token, restart the server, load them into the server and use the last generated token as the input and you'd get the same next token predicted, as in the original server instance. I hope some of you challenge my claim and actually test it - let me know if you do :D
-
-## Why KV cache exists
-
-We can reuse some parts of the computation results to predict the next tokens. You don't have to reuse the results, but they don't change so computing them again and again is a pure waste. You already know that the only data that gets moved forward in the computation is K and V projection and last generated token. If we generate 1 token at the same time, both K and V are vectors of bfloat16s and last generated token is a single int. If we generate more tokens at the same time - in other words, if we do batching - both K and V are matrices of bfloat16s and last generated tokens is a vector of ints.
-
-When we process a token, regardless of whether it's prefill or decode, from perspective of data we preserve (K, V projections and last generated token) it looks the same:
-
-0. ...
-1. Compute K projection using last generated token
-2. Store it
-3. Compute V projection using last generated token
-4. Store it
-5. ...
-6. Use all K projections and all V projections to compute attention
-7. ...
-8. Generate new token
-9. Store it as last generated token
-
-Let's say we don't store K and V projection for current token. It would mean that we need to compute all K and V projections for the current and all previous tokens before we can compute attention for current token. Again, pure waste. That's the reason why store the K and V projections. It's just a record of all previous K and V projections. You don't modify it during the LLM inference. You just append to it, with every processed token. The name of this K and V projections storage is KV cache.
-
-## Attention
-
-https://arxiv.org/pdf/1706.03762
-
-## GQA
-
-https://arxiv.org/pdf/2305.13245
-
-## RoPE
-
-Incoming!
-
-## SiLU
-
-Incoming!
-
-## Residual connections
-
-Incoming!
-
-## Causal mask
-
-Incoming!
-
-## RMS Norm
-
-Incoming!
-
-## Argmax
-
-Incoming!
+A technique to implement RMS norm in CUDA is [parallel reduction](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (tree reduction).
 
 ## cublasGemmEx
 
@@ -711,6 +660,67 @@ cublasGemmEx(cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N, KV_DIM, num_active_slots, 
 I want to preempt the last confusion you might have if you actually dig into the code. The flags `CUBLAS_OP_T` and `CUBLAS_OP_N` tell the cuBLAS which matrices to transpose. And we just derived the formula $C^T=B \times A^T$, so why do we now tell the cuBLAS to transpose the first matrix $B$? To understand it, think about column- / row-major again. From cuBLAS perspective, our row-major $B$ is transposed $B^T$, because cuBLAS reads it as if it were column-major. So we need to tell cuBLAS to transpose it, to get back the $B$ we derived. Similarly, since we derived that the second argument should be $A^T$, and cuBLAS reads row-major $A$ as a column-major $A^T$, then don't transpose it again, because it's how we wanted to provide it to the cublasGemmEx. Q.E.D. :D
 
 > I will publish this section in slightly different form in [Paged Out! Issue #9 in the article "The cuBLAS transposition trick"](https://pagedout.institute/)
+
+
+## Prefill vs decode
+
+An interesting fact about LLM inference is that it's not exactly the same process for the first predicted token vs all the next tokens. To predict the first token, you need to process all the input tokens. The input tokens are user's prompt or the chat history. All the computation that we need to do to get the first predicted token is called _prefill_. Everything that will happen after is called _decode_. 
+
+Most of the computation, like Q projection, attention, attention scores, feed-forward (MLP) is thrown away as soon as it's passed to the next operation - both in prefill and decode. The useful mental model is that the only thing that you preserve at every stage of LLM inference is K projection, V projection and what is the last generated token. That's it. There are interesting implications of it, for instance - you could stop the inference, copy your K and V projections and last generated token, restart the server, load them into the server and use the last generated token as the input and you'd get the same next token predicted, as in the original server instance. I hope some of you challenge my claim and actually test it - let me know if you do :D
+
+## Why KV cache exists
+
+We can reuse some parts of the computation results to predict the next tokens. You don't have to reuse the results, but they don't change so computing them again and again is a pure waste. You already know that the only data that gets moved forward in the computation is K and V projection and last generated token. If we generate 1 token at the same time, both K and V are vectors of bfloat16s and last generated token is a single int. If we generate more tokens at the same time - in other words, if we do batching - both K and V are matrices of bfloat16s and last generated tokens is a vector of ints.
+
+When we process a token, regardless of whether it's prefill or decode, from perspective of data we preserve (K, V projections and last generated token) it looks the same:
+
+0. ...
+1. Compute K projection using last generated token
+2. Store it
+3. Compute V projection using last generated token
+4. Store it
+5. ...
+6. Use all K projections and all V projections to compute attention
+7. ...
+8. Generate new token
+9. Store it as last generated token
+
+Let's say we don't store K and V projection for current token. It would mean that we need to compute all K and V projections for the current and all previous tokens before we can compute attention for current token. Again, pure waste. That's the reason why store the K and V projections. It's just a record of all previous K and V projections. You don't modify it during the LLM inference. You just append to it, with every processed token. The name of this K and V projections storage is KV cache.
+
+
+
+
+## RoPE
+
+Incoming!
+
+## Attention
+
+Attention is an important part of LLM inference. It's where you do a lot of matrix multiplication using Q, K and V projections you computed earlier. A basic formula for scaled dot-product attention that comes from a paper [Attention is all you need](https://arxiv.org/pdf/1706.03762) is:
+
+$$\text{Attention}(Q,K,V)=\text{softmax}(\frac{QK^T}{\sqrt{d_k}})V$$
+
+## GQA
+
+https://arxiv.org/pdf/2305.13245
+
+## SiLU
+
+Incoming!
+
+## Residual connections
+
+Incoming!
+
+## Causal mask
+
+Incoming!
+
+
+
+## Argmax
+
+Incoming!
 
 ## Buffer reuse
 
