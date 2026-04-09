@@ -628,9 +628,29 @@ Based on the paper, the formula is:
 
 $$ \text{normalized}_i = \frac{a_i}{\text{RMS(a)}} \text{, where RMS(a)}=\sqrt{\frac{1}{n}\sum_{i=1}^{n}a^2_i} $$
 
-A technique to implement RMS norm in CUDA is [parallel reduction](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (tree reduction). To compute RMSNorm, we need to compute `RMS(a)` first. It requires going through all the numbers, so we will need some synchronization between threads. Let's write this kernel together again. 
+Let's write this kernel together. 
 
+To compute RMSNorm, we need to compute `RMS(a)` first. It requires going through all the numbers, so we will need some synchronization between threads. We normalize each embedding separately. So again, we launch as many blocks as there are input tokens. Embeddings have 2048 numbers, but 1024 is max threads per block, so we will use the same trick as we used in embeddings gather kernel - we will process two numbers within each thread. We need some temporary value, to which we can write the squares of every number of an embedding. We could use a single variable for it. Every thread within a block would write a square of its number to it. The problem here is synchronization of reads and writes to the shared variable - preventing race condition, ensuring that we will end up with a correct sum. There is another approach, where we create a temporary vector of the same length as number of threads in a block, and each thread writes a square of its value to `threadIdx.x` position in a temporary vector. This way, we ensure that no two threads will try to read or write to the same position in the vector. This technique is called [parallel reduction](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (tree reduction). 
 
+Let's create a vector. We use `__shared__` keyword to indicate that the vector is shared among all threads of a block.
+
+One thing about numerical stability before we move on - remember that our data is bfloat16 format. Main strengths of bfloat16 is a big exponent - 8 bits, same size as float (float32) - but the mantissa is small (7 bits only vs 10 bits in float16). It means that to not lose a precision in our computation, we can use a bigger type to actually compute things inside the kernel - things like a square of each number. We'll use float for this purpose. We will cast every number to float and declare our temporary buffer as float, too.
+
+```cpp
+__shared__ float rms_vector[1024];
+rms_vector[threadIdx.x] = (float)input[workIndex] * (float)input[workIndex];
+```
+
+We wanted to compute two numbers per thread, so we either make `rms_vector` bigger (2048 items) or append the square of a number 1024 indices away to our `rms_vector[threadIdx.x]`. The second one is easier to implement and will be probably much faster, because we will have less steps in a tree reduction - it's faster to reduce to 1 element from 1024 elements than from 2048 elements.
+
+```cpp
+__shared__ float rms_vector[1024];
+rms_vector[threadIdx.x] = (float)input[workIndex] * (float)input[workIndex] + (float)input[workIndex + 1024] * (float)input[workIndex + 1024];
+```
+
+We need to make sure that all threads finish writing to the `rms_vector` before we move forward. CUDA has `__syncthreads()` which we can use for this purpose, and we put it after we write to `rms_vector`.
+
+Now, the reduction part.
 
 ## cublasGemmEx
 
