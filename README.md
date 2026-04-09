@@ -25,31 +25,36 @@ Make yourself a hot beverage and let's begin
 
 After I finish text, I want to draw and add illustrations
 
-- [Intro: LLM, vLLM, models, inference servers, ???](#intro-llm-vllm-models-inference-servers-)
-- [Technical prerequisities](#technical-prerequisities)
-- [Safetensors and your model](#safetensors-and-your-model)
-- [How floating-point numbers work and why we use bfloat16](#how-floating-point-numbers-work-and-why-we-use-bfloat16)
-- [GPU and CPU memory](#gpu-and-cpu-memory)
-- [Single token inference](#single-token-inference)
-- [Prefill vs decode](#prefill-vs-decode)
-- [Why KV cache exists](#why-kv-cache-exists)
-- [GQA](#gqa)
-- [Attention](#attention)
-- [RoPE](#rope)
-- [SiLU](#silu)
-- [Residual connections](#residual-connections)
-- [Causal mask](#causal-mask)
-- [RMS Norm](#rms-norm)
-- [Argmax](#argmax)
-- [cublasGemmEx](#cublasgemmex)
-- [The column-major to row-major transposition trick](#the-column-major-to-row-major-transposition-trick)
-- [Buffer reuse](#buffer-reuse)
-- [Static batching](#static-batching)
-- [Continuous batching](#continuous-batching)
-- [Online softmax](#online-softmax)
-- [Paged Attention](#paged-attention)
-- [Paged KV cache](#paged-kv-cache)
-- [Paged Attention CUDA kernel](#paged-attention-cuda-kernel)
+- [tiny-vllm](#tiny-vllm)
+- [The course below is in progress](#the-course-below-is-in-progress)
+  - [Intro: LLM, vLLM, models, inference servers, ???](#intro-llm-vllm-models-inference-servers-)
+  - [Technical prerequisities](#technical-prerequisities)
+  - [Safetensors and your model](#safetensors-and-your-model)
+  - [How floating-point numbers work and why we use bfloat16](#how-floating-point-numbers-work-and-why-we-use-bfloat16)
+  - [GPU and CPU memory](#gpu-and-cpu-memory)
+  - [Single token inference](#single-token-inference)
+  - [Tokenization](#tokenization)
+  - [Embeddings](#embeddings)
+  - [CUDA kernel engineering - embeddings](#cuda-kernel-engineering---embeddings)
+  - [RMSNorm and parallel reduction in CUDA](#rmsnorm-and-parallel-reduction-in-cuda)
+  - [cublasGemmEx](#cublasgemmex)
+  - [The column-major to row-major transposition trick](#the-column-major-to-row-major-transposition-trick)
+  - [Prefill vs decode](#prefill-vs-decode)
+  - [Why KV cache exists](#why-kv-cache-exists)
+  - [RoPE](#rope)
+  - [Attention](#attention)
+  - [GQA](#gqa)
+  - [SiLU](#silu)
+  - [Residual connections](#residual-connections)
+  - [Causal mask](#causal-mask)
+  - [Argmax](#argmax)
+  - [Buffer reuse](#buffer-reuse)
+  - [Static batching](#static-batching)
+  - [Continuous batching](#continuous-batching)
+  - [Online softmax](#online-softmax)
+  - [Paged Attention](#paged-attention)
+  - [Paged KV cache](#paged-kv-cache)
+  - [Paged Attention CUDA kernel](#paged-attention-cuda-kernel)
 
 ## Intro: LLM, vLLM, models, inference servers, ???
 
@@ -617,9 +622,15 @@ Let's move back from computation and low-level programming to semantics/meaning 
 
 ## RMSNorm and parallel reduction in CUDA
 
-Look back at the sequence of operations in our model (section [Safetensors and your model](#safetensors-and-your-model)). After we retrieve the embeddings for our tokens, it's time for [RMSNorm](https://arxiv.org/abs/1910.07467). Unlike embeddings gather, it's a first operation that will run in layers. Our model, Llama 3.2 1B, has 16 layers. RMSNorm takes our retrieved embeddings and - using model weights for a rms norm `weights.input_layernorm[layer]` - runs RMSNorm function. RMSNorm is an operation that modifies all elements. It normalizes all the elements. To do that, first it needs to see all the elements and compute their [root mean square](https://en.wikipedia.org/wiki/Root_mean_square) sum.
+Look back at the sequence of operations in our model (section [Safetensors and your model](#safetensors-and-your-model)). After we retrieve the embeddings for our tokens, it's time for [RMSNorm](https://arxiv.org/abs/1910.07467). Unlike embeddings gather, it's a first operation that will run in layers. Our model, Llama 3.2 1B, has 16 layers. RMSNorm takes our retrieved embeddings and - using model weights for a rms norm `weights.input_layernorm[layer]` - runs RMSNorm function. RMSNorm is an operation that modifies all numbers in an embedding. To do that, first it needs to see all the elements and compute their [root mean square](https://en.wikipedia.org/wiki/Root_mean_square) sum.
 
-A technique to implement RMS norm in CUDA is [parallel reduction](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (tree reduction).
+Based on the paper, the formula is:
+
+$$ \text{normalized}_i = \frac{a_i}{\text{RMS(a)}} \text{, where RMS(a)}=\sqrt{\frac{1}{n}\sum_{i=1}^{n}a^2_i} $$
+
+A technique to implement RMS norm in CUDA is [parallel reduction](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (tree reduction). To compute RMSNorm, we need to compute `RMS(a)` first. It requires going through all the numbers, so we will need some synchronization between threads. Let's write this kernel together again. 
+
+
 
 ## cublasGemmEx
 
