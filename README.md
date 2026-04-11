@@ -748,12 +748,67 @@ __syncthreads();
 Now `rms_vector[0]` holds the sum of all the squares of its token's embedding numbers. To compute $\text{RMS(a)}$ we need to divide it by a size of an embedding (2048) and take a square root of it: $\text{RMS(a)}=\sqrt{\frac{1}{n}\sum_{i=1}^{n}a^2_i}$.
 
 ```cpp
-rms_vector[0] = sqrt(rms_vector[0] / 2048.0);
+if (threadIdx.x == 0)
+{
+    rms_vector[0] = sqrt(rms_vector[0] / 2048.0); // = RMS(a)
+}
+__syncthreads();
 ```
 
+Now all threads can read `rms_vector[0]` to retrieve $\text{RMS(a)}$. Let's finish our kernel with computing a normalized value for current thread's numbers (the one that corresponds to threadIdx.x and threadIdx.x + 1024). Remember that we want to use `float` when doing math that might be affected by limited precision of `bfloat16`. So, we cast all numbers to `float`s and, before writing to the output memory, we cast it back to `__nv_bfloat16`. 
 
+```cpp
+output[workIndex] = (__nv_bfloat16)(((float)input[workIndex] / rms_vector[0]) * (float)norm_weights[threadIdx.x]);
 
+output[workIndex + 1024] = (__nv_bfloat16)(((float)input[workIndex + 1024] / rms_vector[0]) * (float)norm_weights[threadIdx.x + 1024]);
+```
 
+Almost done!
+
+There is a problem with these two lines. Let's recall at how the $\text{RMS(a)}$ is used when computing a normalized value: $\text{normalized}_i = \frac{a_i}{\text{RMS(a)}}$. If $\text{RMS(a)}$ is 0, then this division becomes a division by 0 and in C++ we'll get NaN or infinity, both means that we lost and even one NaN will corrupt the inference and our engine will produce a garbage or crash. To prevent that from happening, the refernce LLM we use has an epsilon parameter, which defines what value we add to the result of RMSNorm. 
+
+```py
+(input_layernorm): LlamaRMSNorm((2048,), eps=1e-05)
+```
+
+This way, we prevent division by zero and NaNs propagation from happening. Let's just update a line where we compute $\text{RMS(a)}:
+
+```cpp
+if (threadIdx.x == 0)
+{
+    rms_vector[0] = sqrt(rms_vector[0] / 2048.0 + 1.0e-5); // = RMS(a)
+}
+__syncthreads();
+```
+
+Congrats on finishing your RMSNorm CUDA kernel! For a verbosity, we can replace the manual writing down every iteration of the reduction with a for loop and we're done here
+
+```cpp
+__global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_bfloat16 *norm_weights)
+{
+    __shared__ float rms_vector[1024];
+    int workIndex = threadIdx.x + blockIdx.x * 2048;
+    rms_vector[threadIdx.x] = (float)input[workIndex] * (float)input[workIndex] + (float)input[workIndex + 1024] * (float)input[workIndex + 1024];
+    __syncthreads();
+    // tree reduction
+    for (int i = 1; i < 1024; i = i * 2)
+    {
+        if (threadIdx.x % (i * 2) == 0)
+        {
+            rms_vector[threadIdx.x] = rms_vector[threadIdx.x] + rms_vector[threadIdx.x + i];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+    {
+        rms_vector[0] = sqrt(rms_vector[0] / 2048.0 + 1.0e-5);
+    }
+    __syncthreads();
+
+    output[workIndex] = (__nv_bfloat16)(((float)input[workIndex] / rms_vector[0]) * (float)norm_weights[threadIdx.x]);
+    output[workIndex + 1024] = (__nv_bfloat16)(((float)input[workIndex + 1024] / rms_vector[0]) * (float)norm_weights[threadIdx.x + 1024]);
+}
+```
 ## cublasGemmEx
 
 [Matrix multiplication](https://en.wikipedia.org/wiki/Matrix_multiplication) is one of the main operations used in deep learning, most notably in large language models. Matrix is a table of numbers. It has rows and columns. A single row and a single column is called a vector -- a sequence of numbers. Matrix multiplication uses two matrices, A and B, as an input and produces matrix C as an output. Matrix A has dimensions (M, K). Matrix B has dimensions (K, N). Both matrix A and B share the same dimension K. In other words, rows of matrix A have the same length as columns of matrix B. When you multiply A by B, you get a new matrix C with dimensions (M, N):
