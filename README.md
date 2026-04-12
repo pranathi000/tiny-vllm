@@ -37,15 +37,15 @@ After I finish text, I want to draw and add illustrations
   - [Embeddings](#embeddings)
   - [CUDA kernel engineering - embeddings](#cuda-kernel-engineering---embeddings)
   - [RMSNorm and parallel reduction in CUDA](#rmsnorm-and-parallel-reduction-in-cuda)
+  - [RoPE](#rope)
+  - [Residual connections](#residual-connections)
   - [cublasGemmEx](#cublasgemmex)
   - [The column-major to row-major transposition trick](#the-column-major-to-row-major-transposition-trick)
   - [Prefill vs decode](#prefill-vs-decode)
   - [Why KV cache exists](#why-kv-cache-exists)
-  - [RoPE](#rope)
   - [Attention](#attention)
   - [GQA](#gqa)
   - [SiLU](#silu)
-  - [Residual connections](#residual-connections)
   - [Causal mask](#causal-mask)
   - [Argmax](#argmax)
   - [Buffer reuse](#buffer-reuse)
@@ -809,6 +809,15 @@ __global__ void rmsNormKernel(__nv_bfloat16 *input, __nv_bfloat16 *output, __nv_
     output[workIndex + 1024] = (__nv_bfloat16)(((float)input[workIndex + 1024] / rms_vector[0]) * (float)norm_weights[threadIdx.x + 1024]);
 }
 ```
+
+## RoPE
+
+In our reference model, the next operation after RMSNorm is [RoPE](https://arxiv.org/pdf/2104.09864), a way of encoding tokens position into the hidden state (embedding). Very approachable description of positional encoding using RoPE is [here by Christopher Fleetwood](https://fleetwood.dev/posts/you-could-have-designed-SOTA-positional-encoding).
+
+## Residual connections
+
+Incoming!
+
 ## cublasGemmEx
 
 [Matrix multiplication](https://en.wikipedia.org/wiki/Matrix_multiplication) is one of the main operations used in deep learning, most notably in large language models. Matrix is a table of numbers. It has rows and columns. A single row and a single column is called a vector -- a sequence of numbers. Matrix multiplication uses two matrices, A and B, as an input and produces matrix C as an output. Matrix A has dimensions (M, K). Matrix B has dimensions (K, N). Both matrix A and B share the same dimension K. In other words, rows of matrix A have the same length as columns of matrix B. When you multiply A by B, you get a new matrix C with dimensions (M, N):
@@ -876,12 +885,6 @@ When we process a token, regardless of whether it's prefill or decode, from pers
 Let's say we don't store K and V projection for current token. It would mean that we need to compute all K and V projections for the current and all previous tokens before we can compute attention for current token. Again, pure waste. That's the reason why store the K and V projections. It's just a record of all previous K and V projections. You don't modify it during the LLM inference. You just append to it, with every processed token. The name of this K and V projections storage is KV cache.
 
 
-
-
-## RoPE
-
-Incoming!
-
 ## Attention
 
 Attention is an important part of LLM inference. It's where you do a lot of matrix multiplication using Q, K and V projections you computed earlier. A basic formula for scaled dot-product attention that comes from a paper [Attention is all you need](https://arxiv.org/pdf/1706.03762) is:
@@ -896,15 +899,9 @@ https://arxiv.org/pdf/2305.13245
 
 Incoming!
 
-## Residual connections
-
-Incoming!
-
 ## Causal mask
 
 Incoming!
-
-
 
 ## Argmax
 
