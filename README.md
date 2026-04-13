@@ -46,8 +46,10 @@ After I finish text, I want to draw and add illustrations
   - [Attention](#attention)
   - [GQA](#gqa)
   - [SiLU](#silu)
+  - [Softmax](#softmax)
   - [Causal mask](#causal-mask)
   - [Argmax](#argmax)
+  - [Feed forward network](#feed-forward-network)
   - [Buffer reuse](#buffer-reuse)
   - [Static batching](#static-batching)
   - [Continuous batching](#continuous-batching)
@@ -1054,6 +1056,79 @@ void silu(__nv_bfloat16 *a, __nv_bfloat16 *b, int num_tokens)
 }
 ```
 
+## Softmax
+
+[Softmax](https://en.wikipedia.org/wiki/Softmax_function) is a function that normalizes all elements in a vector. This one is a first, "sequential" version of a softmax. We will derive and implement the "online" version of it later. 
+
+$$ \sigma(v)=\frac{e^{v_i}}{\sum_{j=1}{K}e^{v_j}} $$
+
+The way you can implement it is very similar to RMSNorm we implemented earlier.
+
+```cpp
+__global__ void softmaxKernel(__nv_bfloat16 *input, int num_tokens)
+{
+    // softmaxxing per head
+    // might waste a lot of memory by hardcoding the size here but can't use num_tokens directly
+    __shared__ float row[1024]; // row[0] will contain max value after the loop
+    __shared__ float max_val;
+    // find max of the row to subtract it for numerical stability
+    int workIndex = blockIdx.x * num_tokens + threadIdx.x;
+    __nv_bfloat16 token = input[workIndex];
+    row[threadIdx.x] = (float)token;
+    __syncthreads();
+
+    for (int i = 1; i < num_tokens; i = i * 2)
+    {
+        if (threadIdx.x % (i * 2) == 0 && threadIdx.x + i < num_tokens)
+        {
+            row[threadIdx.x] = fmaxf(row[threadIdx.x], row[threadIdx.x + i]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+    {
+        max_val = row[0]; // so I don't need to allocate another shared value for max_val
+    }
+    __syncthreads();
+
+    // turn into exp
+    row[threadIdx.x] = expf((float)token - max_val);
+    __syncthreads();
+
+    // now I can compute the numerical stable sum, similar pattern - tree reduction
+    // reusing row memory
+    for (int i = 1; i < num_tokens; i = i * 2)
+    {
+        if (threadIdx.x % (i * 2) == 0 && threadIdx.x + i < num_tokens)
+        {
+            row[threadIdx.x] = row[threadIdx.x] + row[threadIdx.x + i];
+        }
+        __syncthreads();
+    }
+
+    input[workIndex] = (__nv_bfloat16)(expf((float)token - max_val) / row[0]);
+}
+
+// input are masked attention scores (NUM_Q_HEADS, num_tok, num_tok)
+void softmax(__nv_bfloat16 *input, int num_tokens)
+{
+    if (num_tokens > 1024)
+    {
+        std::cout << "Can't launch more than 1024 threads on RTX 5090, Softmax kernel not launched";
+        return;
+    }
+
+    softmaxKernel<<<num_tokens * NUM_Q_HEADS, num_tokens>>>(input, num_tokens);
+#ifdef DEBUG
+    cudaError error = cudaGetLastError();
+    if (error != cudaError::cudaSuccess)
+    {
+        std::cout << "CUDA last error: " << cudaGetLastError() << std::endl;
+    }
+#endif
+}
+```
+
 ## Causal mask
 
 Every token can attend only to previous tokens. See [this good and straighforward explanation](https://outcomeschool.com/blog/causal-masking-in-attention), so you can code it by yourself. It's really helpful to see the diagrams.
@@ -1114,6 +1189,76 @@ for (int token_idx = 0; token_idx < VOCAB_SIZE; ++token_idx)
 std::cout << "Output token: " << (float)max_token << ", token index: " << std::to_string(max_token_idx) << std::endl;
 ```
 
+## Feed forward network
+
+A [feed-forward network](https://en.wikipedia.org/wiki/Feedforward_neural_network) / fully connected network / multi-layer perceptron. Three linear layers and SiLU.
+
+```cpp
+cublasGemmEx(cublas_handle,
+              CUBLAS_OP_T,
+              CUBLAS_OP_N,
+              HIDDEN_DIM,       // m
+              1,                // n
+              EMBEDDING_LENGTH, // k
+              &gate_alpha,
+              weights.mlp_gate_proj[layer],
+              CUDA_R_16BF,
+              EMBEDDING_LENGTH,
+              rms_norms,
+              CUDA_R_16BF,
+              EMBEDDING_LENGTH,
+              &gate_beta,
+              gate,
+              CUDA_R_16BF,
+              HIDDEN_DIM,
+              CUBLAS_COMPUTE_32F,
+              CUBLAS_GEMM_DEFAULT);
+
+// (1, 2048) * (2048, 8192) -> (1, 8192)
+cublasGemmEx(cublas_handle,
+              CUBLAS_OP_T,
+              CUBLAS_OP_N,
+              HIDDEN_DIM,       // m
+              1,                // n
+              EMBEDDING_LENGTH, // k
+              &up_alpha,
+              weights.mlp_up_proj[layer],
+              CUDA_R_16BF,
+              EMBEDDING_LENGTH,
+              rms_norms,
+              CUDA_R_16BF,
+              EMBEDDING_LENGTH,
+              &up_beta,
+              up,
+              CUDA_R_16BF,
+              HIDDEN_DIM,
+              CUBLAS_COMPUTE_32F,
+              CUBLAS_GEMM_DEFAULT);
+
+silu(gate, up, 1);
+
+down = buf_2048_2;
+cublasGemmEx(cublas_handle,
+              CUBLAS_OP_T,
+              CUBLAS_OP_N,
+              EMBEDDING_LENGTH, // m
+              1,                // n
+              HIDDEN_DIM,       // k
+              &down_alpha,
+              weights.mlp_down_proj[layer],
+              CUDA_R_16BF,
+              HIDDEN_DIM,
+              gate,
+              CUDA_R_16BF,
+              HIDDEN_DIM,
+              &down_beta,
+              down,
+              CUDA_R_16BF,
+              EMBEDDING_LENGTH,
+              CUBLAS_COMPUTE_32F,
+              CUBLAS_GEMM_DEFAULT);
+```
+
 ## Buffer reuse
 
 Sometimes, a buffer you allocate has the same size as a buffer that will be used later in the code. And sometimes, when second buffer starts to be needed after when data in the first buffer is not needed anymore (it was already used in a computation and won't be used anywhere else), then we can use the first buffer to write data, which we would write to the second buffer. This way, we can allocate less memory. It means we reuse the same buffer between two different places. We can safely do it, once we confirm by lifetime analysis that lifetimes of these two buffers don't overlap. See how it works in for `buf_2048_1` and `buf_2028_2` in [`src/main.cpp`](src/main.cpp)
@@ -1122,7 +1267,7 @@ Sometimes, a buffer you allocate has the same size as a buffer that will be used
 
 ## Static batching
 
-Instead of processing one request at a time, we process N requests. The pros: bigger throughput (more user requests processed at the same time). The cons: higher latency (all prompts in the batch need to wait until the longest prompt finishes processing, before being returned to the user).
+Instead of processing one request at a time, we process N requests. The pros: bigger throughput (more user requests processed at the same time). The cons: higher latency (all prompts in the batch need to wait until the longest prompt finishes processing, before being returned to the user). What you need is to basically in every place where we assumed there is a single token processed at a time, process multiple ones. Same goes for prefill - for multiple prompts, etc.
 
 < TODO write more >
 
