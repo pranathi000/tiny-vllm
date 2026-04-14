@@ -19,15 +19,8 @@ The inference engine consists of:
 
 Make yourself a hot beverage and let's begin
 
-# The course below is in progress
-
-**ETA: end of April 2026**
-
-After I finish text, I want to draw and add illustrations
-
 - [tiny-vllm](#tiny-vllm)
-- [The course below is in progress](#the-course-below-is-in-progress)
-  - [Intro: LLM, vLLM, models, inference servers, ???](#intro-llm-vllm-models-inference-servers-)
+  - [Intro: LLM, vLLM, models, inference servers](#intro-llm-vllm-models-inference-servers)
   - [Technical prerequisities](#technical-prerequisities)
   - [Safetensors and your model](#safetensors-and-your-model)
   - [How floating-point numbers work and why we use bfloat16](#how-floating-point-numbers-work-and-why-we-use-bfloat16)
@@ -58,7 +51,7 @@ After I finish text, I want to draw and add illustrations
   - [Paged KV cache](#paged-kv-cache)
   - [Paged Attention CUDA kernel](#paged-attention-cuda-kernel)
 
-## Intro: LLM, vLLM, models, inference servers, ???
+## Intro: LLM, vLLM, models, inference servers
 
 It's easy to get lost with so much going on recent years. Let's unpack it
 
@@ -1294,7 +1287,5 @@ Incoming!
 ## Paged Attention CUDA kernel
 
 Incoming!
-
-TODO: synchronize section names with ToC and add drawings
 
 Jędrzej Maczan, 2026, Apache License 2.0
