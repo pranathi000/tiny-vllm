@@ -1,3 +1,4 @@
+#include "cuda_to_hip.h"
 #include "kernels.cuh"
 #include <iostream>
 
@@ -407,11 +408,11 @@ __global__ void pagedAttentionKernel(int layer, int num_active_slots, __nv_bfloa
             float qk = (float)q * (float)*k;
             // tree reduction within current warp, thread 0 gets sum of all 32 elements within warp
             // could be done with __syncthreads but accessing memory of other threads in warp is op
-            qk += __shfl_down_sync(0xffffffff, qk, 16);
-            qk += __shfl_down_sync(0xffffffff, qk, 8);
-            qk += __shfl_down_sync(0xffffffff, qk, 4);
-            qk += __shfl_down_sync(0xffffffff, qk, 2);
-            qk += __shfl_down_sync(0xffffffff, qk, 1);
+            qk += __shfl_down_sync(WARP_FULL_MASK, qk, 16);
+            qk += __shfl_down_sync(WARP_FULL_MASK, qk, 8);
+            qk += __shfl_down_sync(WARP_FULL_MASK, qk, 4);
+            qk += __shfl_down_sync(WARP_FULL_MASK, qk, 2);
+            qk += __shfl_down_sync(WARP_FULL_MASK, qk, 1);
             if (thread_id == 0)
             {
                 dot_products[0] = qk;

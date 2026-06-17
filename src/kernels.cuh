@@ -1,5 +1,12 @@
 #pragma once
+
+#if defined(USE_HIP) || defined(__HIP_PLATFORM_AMD__)
+#include <hip/hip_bf16.h>
+#define __nv_bfloat16 __hip_bfloat16
+#define nv_bfloat16   __hip_bfloat16
+#else
 #include <cuda_bf16.h>
+#endif
 
 // prefill
 void embeddingGather(int *gpu_input_tokens, __nv_bfloat16 *gpu_input_embeds, __nv_bfloat16 *embed_tokens, int num_input_tokens);
