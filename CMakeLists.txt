@@ -8,6 +8,8 @@ if(NOT USE_HIP)
 endif()
 
 if(USE_HIP)
+    # project(... LANGUAGES ... HIP) honors -DCMAKE_HIP_ARCHITECTURES, otherwise
+    # auto-detects the host GPU and errors on a no-GPU build host.
     project(tiny-vllm LANGUAGES CXX HIP)
 else()
     project(tiny-vllm LANGUAGES CXX CUDA)
@@ -16,12 +18,7 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(USE_HIP)
-    # HIP architecture: default to gfx90a if not specified
-    if(NOT DEFINED CMAKE_HIP_ARCHITECTURES OR CMAKE_HIP_ARCHITECTURES STREQUAL "")
-        set(CMAKE_HIP_ARCHITECTURES "gfx90a")
-    endif()
-else()
+if(NOT USE_HIP)
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_ARCHITECTURES 120)
