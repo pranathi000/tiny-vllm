@@ -1,8 +1,5 @@
 #pragma once
 
-// Copyright (c) 2026 Advanced Micro Devices, Inc.
-// Author: Jeff Daily <jeff.daily@amd.com>
-//
 // CUDA-to-HIP compatibility header for tiny-vllm
 // Keeps CUDA spellings in source and aliases them to HIP on AMD GPUs
 
