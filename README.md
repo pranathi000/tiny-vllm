@@ -88,6 +88,15 @@ The exact setup on which I develop and test it:
 
 Install the dependencies and run the program with `./test.sh` - it will build it and immediately execute it
 
+It also runs on AMD GPUs through ROCm/HIP. Pass `-DUSE_HIP=ON` to CMake and it builds with hipcc against hipBLAS instead of nvcc and cuBLAS; the CUDA sources are reused as-is through a thin `src/cuda_to_hip.h` compatibility header. Pick your GPU's architecture with `-DCMAKE_HIP_ARCHITECTURES` (for example `gfx90a` for MI200, `gfx1100` for RDNA3, `gfx1201` for RDNA4) - it is not hardcoded, so set it to match your card:
+
+```bash
+cmake -B build -DUSE_HIP=ON -DCMAKE_HIP_ARCHITECTURES=gfx1100 -DCMAKE_PREFIX_PATH=/opt/rocm -G Ninja
+cmake --build build
+```
+
+The `-DCMAKE_PREFIX_PATH=/opt/rocm` lets CMake find the hip and hipBLAS packages; drop it if `/opt/rocm/bin` is already on your `PATH`, or change it if ROCm lives elsewhere. I tested the AMD path on gfx90a, gfx1100, and gfx1201. The default build (no `-DUSE_HIP`) is unchanged and still targets NVIDIA through CUDA.
+
 If you fail to build or run it and your AI of choice won't be able to help, please open an Issue on GitHub - I will try to help. Make sure to provide all useful context
 
 ## Safetensors and your model
