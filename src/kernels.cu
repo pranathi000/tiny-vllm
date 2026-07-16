@@ -1,7 +1,7 @@
 #include "cuda_to_hip.h"
 #include "kernels.cuh"
 #include <iostream>
-
+// changes made
 // TODO perhaps share these between main.cpp and kernels.cu to not duplicate them?
 
 constexpr int N_LAYERS = 16; // TODO: hardcoded for llama 3.2 1B, just like any other value for now
